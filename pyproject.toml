@@ -1,0 +1,15 @@
+[project]
+name = "almela"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=2.3.3",
+    "pandas>=2.3.3",
+    "scipy>=1.16.2",
+    "ten-vad",
+]
+
+[tool.uv.sources]
+ten-vad = { git = "https://github.com/TEN-framework/ten-vad.git" }
