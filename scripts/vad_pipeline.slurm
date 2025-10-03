@@ -13,8 +13,9 @@
 # Set strict error handling
 set -euo pipefail
 
-# Create logs directory if it doesn't exist
+# Create directories if they don't exist
 mkdir -p logs
+mkdir -p output
 
 # Print job information
 echo "==============================================="
@@ -42,8 +43,15 @@ export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
 export NUMBA_NUM_THREADS=$SLURM_CPUS_PER_TASK
 export OPENBLAS_NUM_THREADS=$SLURM_CPUS_PER_TASK
 
+# Get the directory where this script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+
+echo "Script directory: $SCRIPT_DIR"
+echo "Project directory: $PROJECT_DIR"
+
 # Change to the project directory
-cd $SLURM_SUBMIT_DIR
+cd "$PROJECT_DIR"
 
 # Function to check command success
 check_command() {
@@ -98,16 +106,17 @@ else
         exit 1
     fi
     
-    # Check if flatten_dataset.sh exists
-    if [ ! -f "flatten_dataset.sh" ]; then
-        echo "ERROR: flatten_dataset.sh script not found!"
+        # Check if flatten_dataset.sh exists in scripts directory
+    FLATTEN_SCRIPT="$SCRIPT_DIR/flatten_dataset.sh"
+    if [ ! -f "$FLATTEN_SCRIPT" ]; then
+        echo "ERROR: flatten_dataset.sh script not found at $FLATTEN_SCRIPT!"
         exit 1
     fi
     
     # Make flatten_dataset.sh executable and run it
-    chmod +x flatten_dataset.sh
-    echo "Running: ./flatten_dataset.sh '$EN_DIR'"
-    ./flatten_dataset.sh "$EN_DIR"
+    chmod +x "$FLATTEN_SCRIPT"
+    echo "Running: $FLATTEN_SCRIPT '$EN_DIR'"
+    "$FLATTEN_SCRIPT" "$EN_DIR"
     check_command "Directory flattening"
     
     # Verify the flattened directory was created
@@ -133,13 +142,17 @@ if [ "$WAV_COUNT" -eq 0 ]; then
     exit 1
 fi
 
+# Use all available CPUs for optimal performance
+OPTIMAL_WORKERS=$SLURM_CPUS_PER_TASK
+echo "Using $OPTIMAL_WORKERS workers for optimal performance"
+
 # Run the VAD pipeline
 echo "==============================================="
 echo "Starting VAD processing at $(date)"
 echo "==============================================="
 
 echo "Running VAD pipeline with logging and progress tracking..."
-python vad_pipeline.py \
+python "$SCRIPT_DIR/vad_pipeline.py" \
     --data_dir "$DATA_DIR" \
     --workers $OPTIMAL_WORKERS \
     --hop_size 256 \
