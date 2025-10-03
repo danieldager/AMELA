@@ -68,39 +68,59 @@ def process_single_wav(args):
     """Process a single WAV file - designed for multiprocessing."""
     wav_path, hop_size, threshold = args
 
-    # Initialize model (each process gets its own)
-    TV = TenVad(hop_size=hop_size, threshold=threshold)
+    try:
+        # Initialize model (each process gets its own)
+        # This can fail if TEN-VAD isn't properly installed
+        TV = TenVad(hop_size=hop_size, threshold=threshold)
+    except Exception as e:
+        return {
+            "filename": wav_path.name,
+            "error": f"TenVad initialization failed: {str(e)}",
+            "top-file": None,
+            "mid-file": None,
+            "sequence": None,
+            "duration": None,
+            "max-spoken": None,
+            "min-spoken": None,
+            "avg-spoken": None,
+            "max-nospch": None,
+            "min-nospch": None,
+            "avg-nospch": None,
+            "spch-ratio": None,
+            "flagged_ns": None,
+            "flagged_1m": None,
+        }
 
     try:
         # Decompose filename (specific to our naming convention)
-        parts = wav_path.stem.split("-")
-        if len(parts) < 3:
-            raise ValueError(f"Invalid filename format: {wav_path.stem}")
+        top, _, seq = wav_path.stem.split("-")
+        mid, _, _, _, seq = seq.split("_")
 
-        top, _, seq = parts[0], parts[1], parts[2]
-        seq_parts = seq.split("_")
-        if len(seq_parts) >= 5:
-            mid = seq_parts[1]
-        else:
-            mid = "unknown"
+        # Read wav file - handle both absolute paths and symlinks
+        sr, data = Wavfile.read(str(wav_path))
 
-        # Read wav file
-        sr, data = Wavfile.read(wav_path)
+        # Ensure data is in the right format (mono, int16/float32)
+        if len(data.shape) > 1:
+            data = data[:, 0]  # Take first channel if stereo
+
         duration = len(data) / sr
 
         # Vectorized frame extraction
         num_frames = len(data) // hop_size
         if num_frames == 0:
-            raise ValueError("Audio too short for given hop size")
+            raise ValueError(
+                f"Audio too short for hop_size {hop_size}: {len(data)} samples"
+            )
         frames = data[: num_frames * hop_size].reshape(-1, hop_size)
 
-        # Pre-allocate arrays
+        # Pre-allocate arrays for better memory efficiency
         probs = np.empty(num_frames, dtype=np.float32)
         flags = np.empty(num_frames, dtype=np.uint8)
 
-        process = TV.process
+        # Process frames - cache the process method for speed
+        process_func = TV.process
         for i in range(num_frames):
-            probs[i], flags[i] = process(frames[i])
+            probs[i], flags[i] = process_func(frames[i])
 
         # Calculate speech ratio
         spch_ratio = float(flags.mean())
@@ -177,7 +197,7 @@ def process_wavs_optimized(
         logger = logging.getLogger(__name__)
 
     if max_workers is None:
-        max_workers = min(mp.cpu_count(), len(WAVS))
+        max_workers = mp.cpu_count()
 
     logger.info(f"Using {max_workers} parallel workers for {len(WAVS)} files")
 
@@ -299,12 +319,26 @@ def main():
         )
 
         # Save results
+        if not results:
+            logger.error("No results generated - all files failed processing")
+            sys.exit(1)
+
         df = pd.DataFrame(results)
         df.to_csv(args.output, index=False)
         logger.info(f"Results saved to {args.output}")
 
-        successful = df[df["error"].isna()] if "error" in df.columns else df
-        logger.info(f"Successfully processed: {len(successful)}/{len(df)} files")
+        # Calculate success rate
+        if "error" in df.columns:
+            successful = df[df["error"].isna()]
+            errors = df[df["error"].notna()]
+            logger.info(f"Successfully processed: {len(successful)}/{len(df)} files")
+            if len(errors) > 0:
+                logger.warning(f"Failed files: {len(errors)}")
+                # Log a few examples of errors
+                for _, row in errors.head(3).iterrows():
+                    logger.warning(f"  {row['filename']}: {row['error']}")
+        else:
+            logger.info(f"Successfully processed: {len(df)} files")
 
     except Exception as e:
         logger.error(f"Pipeline failed: {e}")

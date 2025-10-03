@@ -1,14 +1,14 @@
 #!/bin/bash
-#SBATCH --job-name=vad_pipeline_enhanced
+#SBATCH --job-name=VAD_processing
+#SBATCH --time=24:00:00
+#SBATCH --mem=32G
+#SBATCH --ntasks=1
+#SBATCH --partition=cpu
+#SBATCH --cpus-per-task=40
+#SBATCH --mail-type=BEGIN,END,FAIL
+#SBATCH --mail-user=dager.verde@gmail.com
 #SBATCH --output=logs/vad_pipeline_%j.out
 #SBATCH --error=logs/vad_pipeline_%j.err
-#SBATCH --time=24:00:00
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=32G
-#SBATCH --partition=cpu
-#SBATCH --mail-type=BEGIN,END,FAIL
-#SBATCH --mail-user=your.email@domain.com
 
 # Set strict error handling
 set -euo pipefail
@@ -31,8 +31,7 @@ echo "Working directory: $(pwd)"
 echo "Submit directory: $SLURM_SUBMIT_DIR"
 echo "==============================================="
 
-# Load required modules (adjust based on your cluster)
-# Uncomment and modify these lines based on your HPC system:
+# Load required modules 
 # module load python/3.11
 # module load gcc/11.2.0
 # module load cuda/11.8  # if GPU support needed
@@ -54,96 +53,99 @@ check_command() {
     fi
 }
 
-# Create and activate virtual environment if it doesn't exist
-if [ ! -d "venv" ]; then
-    echo "Creating virtual environment..."
-    python -m venv venv
-    check_command "Virtual environment creation"
+# Install uv if not available (most HPC systems won't have it pre-installed)
+if ! command -v uv &> /dev/null; then
+    echo "Installing uv package manager..."
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    # Add uv to PATH for this session
+    export PATH="$HOME/.cargo/bin:$PATH"
+    check_command "uv installation"
 fi
 
-echo "Activating virtual environment..."
-source venv/bin/activate
+# Use uv to create virtual environment and install all dependencies from lock file
+# This will create a .venv directory and install everything from pyproject.toml + uv.lock
+echo "Creating virtual environment and installing dependencies with uv..."
+uv sync
+check_command "uv sync (environment creation and dependency installation)"
+
+# Activate the virtual environment created by uv
+echo "Activating uv-managed virtual environment..."
+source .venv/bin/activate
 check_command "Virtual environment activation"
 
-# Upgrade pip and install dependencies
-echo "Upgrading pip..."
-pip install --upgrade pip
-check_command "Pip upgrade"
-
-# Install dependencies using uv if available, otherwise pip
-if command -v uv &> /dev/null; then
-    echo "Installing dependencies with uv..."
-    uv pip install numpy>=2.3.3 pandas>=2.3.3 scipy>=1.16.2
-    uv pip install git+https://github.com/TEN-framework/ten-vad.git
-else
-    echo "Installing dependencies with pip..."
-    pip install numpy>=2.3.3 pandas>=2.3.3 scipy>=1.16.2
-    pip install git+https://github.com/TEN-framework/ten-vad.git
-fi
-check_command "Dependency installation"
+echo "Running job on $(hostname)"
+echo "python: $(which python)"
+echo "python-version $(python -V)"
 
 # Verify python packages
 echo "Verifying installed packages..."
 python -c "import numpy, pandas, scipy, ten_vad; print('All packages imported successfully')"
 check_command "Package verification"
 
-# Check if data needs to be flattened
-if [ ! -d "EN_flat" ] && [ -d "EN" ]; then
-    echo "EN_flat directory not found, but EN directory exists."
-    echo "Running flatten.sh to create flat structure..."
+# Set data directory paths for the cluster (script creates _flat, not _flatten)
+EN_DIR="/store/projects/InfTrain/dataset/wav/EN"
+EN_FLAT_DIR="/store/projects/InfTrain/dataset/wav/EN_flat"
+
+# Check if flattened data already exists, otherwise create it
+if [ -d "$EN_FLAT_DIR" ]; then
+    echo "Found existing flattened data directory"
+else
+    echo "Flattened data not found. Creating flat structure..."
     
-    # Make flatten.sh executable if it isn't
-    chmod +x flatten.sh
-    ./flatten.sh EN
+    # Verify original data exists
+    if [ ! -d "$EN_DIR" ]; then
+        echo "ERROR: Original data directory not found: $EN_DIR"
+        exit 1
+    fi
+    
+    # Check if flatten_dataset.sh exists
+    if [ ! -f "flatten_dataset.sh" ]; then
+        echo "ERROR: flatten_dataset.sh script not found!"
+        exit 1
+    fi
+    
+    # Make flatten_dataset.sh executable and run it
+    chmod +x flatten_dataset.sh
+    echo "Running: ./flatten_dataset.sh '$EN_DIR'"
+    ./flatten_dataset.sh "$EN_DIR"
     check_command "Directory flattening"
-elif [ ! -d "EN_flat" ]; then
-    echo "ERROR: Neither EN_flat nor EN directory found!"
-    echo "Available directories:"
-    ls -la
-    exit 1
+    
+    # Verify the flattened directory was created
+    if [ ! -d "$EN_FLAT_DIR" ]; then
+        echo "ERROR: Flattening failed - $EN_FLAT_DIR was not created"
+        exit 1
+    fi
+    echo "Successfully created flattened directory"
 fi
 
+# Use the flattened directory for processing
+DATA_DIR="$EN_FLAT_DIR"
+
 # Count wav files and verify data
-WAV_COUNT=$(find EN_flat -name "*.wav" 2>/dev/null | wc -l)
+echo "Scanning for WAV files in: $DATA_DIR"
+WAV_COUNT=$(find "$DATA_DIR" -name "*.wav" 2>/dev/null | wc -l)
 echo "Found $WAV_COUNT WAV files to process"
 
 if [ "$WAV_COUNT" -eq 0 ]; then
-    echo "ERROR: No WAV files found in EN_flat directory!"
-    echo "Contents of EN_flat:"
-    ls -la EN_flat/ | head -20
+    echo "ERROR: No WAV files found in data directory!"
+    echo "Contents of $DATA_DIR:"
+    ls -la "$DATA_DIR" | head -20
     exit 1
 fi
 
-# Estimate processing time (rough estimate: 100-1000 files per minute depending on file size)
-ESTIMATED_MINUTES=$((WAV_COUNT / 500))
-echo "Estimated processing time: ~$ESTIMATED_MINUTES minutes"
-
-# Determine optimal number of workers
-OPTIMAL_WORKERS=$SLURM_CPUS_PER_TASK
-if [ "$WAV_COUNT" -lt "$SLURM_CPUS_PER_TASK" ]; then
-    OPTIMAL_WORKERS=$WAV_COUNT
-fi
-echo "Using $OPTIMAL_WORKERS workers for optimal performance"
-
-# Run the enhanced VAD pipeline with appropriate parameters
+# Run the VAD pipeline
 echo "==============================================="
 echo "Starting VAD processing at $(date)"
 echo "==============================================="
 
-# Choose which pipeline to run
-if [ -f "pipeline_enhanced.py" ]; then
-    echo "Running enhanced pipeline with logging and progress tracking..."
-    python pipeline_enhanced.py \
-        --input-dir EN_flat \
-        --output "vad_results_$(date +%Y%m%d_%H%M%S).csv" \
-        --workers $OPTIMAL_WORKERS \
-        --hop-size 256 \
-        --threshold 0.5 \
-        --log-level INFO
-else
-    echo "Running original pipeline..."
-    python pipeline.py
-fi
+echo "Running VAD pipeline with logging and progress tracking..."
+python vad_pipeline.py \
+    --input-dir "$DATA_DIR" \
+    --output "vad_results_$(date +%Y%m%d_%H%M%S).csv" \
+    --workers $OPTIMAL_WORKERS \
+    --hop-size 256 \
+    --threshold 0.5 \
+    --log-level INFO
 
 check_command "VAD pipeline execution"
 
@@ -163,32 +165,6 @@ if [ -f "$RESULTS_FILE" ]; then
     echo "Output saved to: $RESULTS_FILE"
     echo "File size: $(du -h "$RESULTS_FILE" | cut -f1)"
     
-    # Show sample results
-    echo ""
-    echo "Sample of results (first 5 rows):"
-    head -n 6 "$RESULTS_FILE"
-    
-    # Basic statistics if the enhanced pipeline was used
-    if command -v python &> /dev/null; then
-        echo ""
-        echo "Basic statistics:"
-        python -c "
-import pandas as pd
-df = pd.read_csv('$RESULTS_FILE')
-if 'duration' in df.columns and not df['duration'].isna().all():
-    print(f'Total files: {len(df)}')
-    print(f'Average duration: {df[\"duration\"].mean():.2f}s')
-    print(f'Total audio duration: {df[\"duration\"].sum():.2f}s ({df[\"duration\"].sum()/3600:.2f} hours)')
-    if 'spch-ratio' in df.columns:
-        print(f'Average speech ratio: {df[\"spch-ratio\"].mean():.3f}')
-    if 'flagged_1m' in df.columns:
-        print(f'Files >1min: {df[\"flagged_1m\"].sum()}')
-    if 'flagged_ns' in df.columns:
-        print(f'Files flagged (no speech): {df[\"flagged_ns\"].sum()}')
-else:
-    print('Results file created but may contain errors. Check the log file.')
-"
-    fi
 else
     echo "ERROR: $RESULTS_FILE was not created!"
     echo "Check the error log for details."

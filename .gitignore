@@ -10,6 +10,7 @@ wheels/
 # Virtual environments
 .venv
 
+# Folders
 data/
 outs/
 ignore/
