@@ -4,7 +4,7 @@
 #SBATCH --mem=32G
 #SBATCH --ntasks=1
 #SBATCH --partition=erc-dupoux
-#SBATCH --cpus-per-task=50
+#SBATCH --cpus-per-task=32
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=dager.verde@gmail.com
 #SBATCH --output=logs/%j.out
@@ -39,15 +39,8 @@ export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
 export NUMBA_NUM_THREADS=$SLURM_CPUS_PER_TASK
 export OPENBLAS_NUM_THREADS=$SLURM_CPUS_PER_TASK
 
-# Get the directory where this script is located
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-
-echo "Script directory: $SCRIPT_DIR"
-echo "Project directory: $PROJECT_DIR"
-
-# Change to the project directory
-cd "$PROJECT_DIR"
+# Change to the project directory (assumes sbatch run from project root)
+cd "$SLURM_SUBMIT_DIR"
 echo "Current working directory: $(pwd)"
 
 # Verify pyproject.toml exists
@@ -114,16 +107,15 @@ else
     fi
     
         # Check if flatten_dataset.sh exists in scripts directory
-    FLATTEN_SCRIPT="$SCRIPT_DIR/flatten_dataset.sh"
-    if [ ! -f "$FLATTEN_SCRIPT" ]; then
-        echo "ERROR: flatten_dataset.sh script not found at $FLATTEN_SCRIPT!"
+    if [ ! -f "scripts/flatten_dataset.sh" ]; then
+        echo "ERROR: scripts/flatten_dataset.sh script not found!"
         exit 1
     fi
     
     # Make flatten_dataset.sh executable and run it
-    chmod +x "$FLATTEN_SCRIPT"
-    echo "Running: $FLATTEN_SCRIPT '$EN_DIR'"
-    "$FLATTEN_SCRIPT" "$EN_DIR"
+    chmod +x scripts/flatten_dataset.sh
+    echo "Running: ./scripts/flatten_dataset.sh '$EN_DIR'"
+    ./scripts/flatten_dataset.sh "$EN_DIR"
     check_command "Directory flattening"
     
     # Verify the flattened directory was created
@@ -159,7 +151,7 @@ echo "Starting VAD processing at $(date)"
 echo "==============================================="
 
 echo "Running VAD pipeline with logging and progress tracking..."
-python "$SCRIPT_DIR/vad_pipeline.py" \
+python scripts/vad_pipeline.py \
     --data_dir "$DATA_DIR" \
     --workers $OPTIMAL_WORKERS \
     --hop_size 256 \
