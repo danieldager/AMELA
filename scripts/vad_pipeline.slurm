@@ -28,10 +28,15 @@ echo "Working directory: $(pwd)"
 echo "Submit directory: $SLURM_SUBMIT_DIR"
 echo "==============================================="
 
-# Load required modules
-# module load python/3.11
-# module load gcc/11.2.0
+# Load required modules for C++ runtime and compilation tools
+module load gcc/11.2.0
+module load python/3.11
 # module load cuda/11.8  # if GPU support needed
+
+# Set up environment for C++ libraries
+export CC=gcc
+export CXX=g++
+export LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH"
 
 # Set environment variables for optimal CPU usage
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
@@ -73,7 +78,12 @@ fi
 # This will create a .venv directory and install everything from pyproject.toml + uv.lock
 echo "Creating virtual environment and installing dependencies with uv..."
 echo "Running 'uv sync' from directory: $(pwd)"
-uv sync
+# Force reinstall of ten-vad to ensure it's compiled for this environment
+if [ -d ".venv" ]; then
+    echo "Removing existing .venv to force clean install..."
+    rm -rf .venv
+fi
+uv sync --link-mode=copy
 check_command "uv sync (environment creation and dependency installation)"
 
 # Activate the virtual environment created by uv
@@ -87,7 +97,23 @@ echo "python-version $(python -V)"
 
 # Verify python packages
 echo "Verifying installed packages..."
-python -c "import numpy, pandas, scipy, ten_vad; print('All packages imported successfully')"
+echo "Testing numpy, pandas, scipy..."
+python -c "import numpy, pandas, scipy; print('Basic packages OK')"
+echo "Testing ten_vad (this might show the actual error)..."
+python -c "
+try:
+    import ten_vad
+    print('TEN-VAD imported successfully')
+    # Test actual initialization
+    from ten_vad import TenVad
+    tv = TenVad(hop_size=256, threshold=0.5)
+    print('TEN-VAD initialization test passed')
+except Exception as e:
+    print(f'TEN-VAD error: {e}')
+    import traceback
+    traceback.print_exc()
+    exit(1)
+"
 check_command "Package verification"
 
 # Set data directory paths for the cluster (script creates _flat, not _flatten)
