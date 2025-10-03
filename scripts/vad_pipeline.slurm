@@ -3,19 +3,15 @@
 #SBATCH --time=24:00:00
 #SBATCH --mem=32G
 #SBATCH --ntasks=1
-#SBATCH --partition=cpu
-#SBATCH --cpus-per-task=40
+#SBATCH --partition=erc-dupoux
+#SBATCH --cpus-per-task=50
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=dager.verde@gmail.com
-#SBATCH --output=logs/vad_pipeline_%j.out
-#SBATCH --error=logs/vad_pipeline_%j.err
+#SBATCH --output=logs/%j.out
+#SBATCH --error=logs/%j.err
 
 # Set strict error handling
 set -euo pipefail
-
-# Create directories if they don't exist
-mkdir -p logs
-mkdir -p output
 
 # Print job information
 echo "==============================================="
@@ -23,7 +19,7 @@ echo "VAD Pipeline SLURM Job Information"
 echo "==============================================="
 echo "Job ID: $SLURM_JOB_ID"
 echo "Job Name: $SLURM_JOB_NAME"
-echo "Node: $SLURM_NODELIST" 
+echo "Node: $SLURM_NODELIST"
 echo "CPUs per task: $SLURM_CPUS_PER_TASK"
 echo "Memory per node: $SLURM_MEM_PER_NODE MB"
 echo "Partition: $SLURM_JOB_PARTITION"
@@ -32,7 +28,7 @@ echo "Working directory: $(pwd)"
 echo "Submit directory: $SLURM_SUBMIT_DIR"
 echo "==============================================="
 
-# Load required modules 
+# Load required modules
 # module load python/3.11
 # module load gcc/11.2.0
 # module load cuda/11.8  # if GPU support needed
@@ -52,6 +48,16 @@ echo "Project directory: $PROJECT_DIR"
 
 # Change to the project directory
 cd "$PROJECT_DIR"
+echo "Current working directory: $(pwd)"
+
+# Verify pyproject.toml exists
+if [ ! -f "pyproject.toml" ]; then
+    echo "ERROR: pyproject.toml not found in $(pwd)"
+    echo "Contents of current directory:"
+    ls -la
+    exit 1
+fi
+echo "Found pyproject.toml in $(pwd)"
 
 # Function to check command success
 check_command() {
@@ -73,6 +79,7 @@ fi
 # Use uv to create virtual environment and install all dependencies from lock file
 # This will create a .venv directory and install everything from pyproject.toml + uv.lock
 echo "Creating virtual environment and installing dependencies with uv..."
+echo "Running 'uv sync' from directory: $(pwd)"
 uv sync
 check_command "uv sync (environment creation and dependency installation)"
 
