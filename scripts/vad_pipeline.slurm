@@ -140,19 +140,19 @@ echo "==============================================="
 
 echo "Running VAD pipeline with logging and progress tracking..."
 python vad_pipeline.py \
-    --input-dir "$DATA_DIR" \
-    --output "vad_results_$(date +%Y%m%d_%H%M%S).csv" \
+    --data_dir "$DATA_DIR" \
     --workers $OPTIMAL_WORKERS \
-    --hop-size 256 \
+    --hop_size 256 \
     --threshold 0.5 \
-    --log-level INFO
+    --log_level INFO
 
 check_command "VAD pipeline execution"
 
-# Find the most recent results file
-RESULTS_FILE=$(ls -t vad_results*.csv 2>/dev/null | head -1)
+# Find the most recent results file in output directory
+RESULTS_FILE=$(find output -name "vad_results_*.csv" -type f 2>/dev/null | head -1)
 if [ -z "$RESULTS_FILE" ]; then
-    RESULTS_FILE="vad_results.csv"
+    echo "ERROR: No results file found in output directory!"
+    exit 1
 fi
 
 # Check if output was created and analyze results
