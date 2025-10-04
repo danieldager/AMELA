@@ -21,49 +21,70 @@ echo "Node: $SLURM_NODELIST"
 echo "CPUs: $SLURM_CPUS_PER_TASK"
 echo "Working directory: $(pwd)"
 
-# Load modules
-echo "Loading Python module..."
+# Load modules (including conda if available)
+echo "Loading modules..."
 module purge
 module load python/3.11
+
+# Try to load conda module if available
+if module avail conda 2>&1 | grep -q conda; then
+    module load conda
+    echo "Loaded conda module"
+elif command -v conda &> /dev/null; then
+    echo "Conda already available"
+else
+    echo "Conda not available, will use pip approach"
+fi
 
 # Go to project directory
 cd "$SLURM_SUBMIT_DIR"
 echo "Changed to project directory: $(pwd)"
 
-# Create virtual environment if it doesn't exist
-if [ ! -d "venv" ]; then
-    echo "Creating virtual environment..."
-    python -m venv venv
+# Try conda approach first if available
+if command -v conda &> /dev/null; then
+    echo "Using conda environment approach..."
+    
+    # Create conda environment with C++ runtime libraries
+    ENV_NAME="vad_env_$$"  # Unique name using process ID
+    echo "Creating conda environment: $ENV_NAME"
+    conda create -n "$ENV_NAME" python=3.11 libcxx libcxxabi libstdcxx-ng -y
+    
+    # Activate conda environment
+    echo "Activating conda environment..."
+    source activate "$ENV_NAME"
+    echo "Python: $(which python)"
+    
+    # Install Python packages
+    echo "Installing Python packages with conda..."
+    conda install numpy pandas scipy -y
+    
+    # Install TEN-VAD with pip in conda env
+    echo "Installing TEN-VAD..."
+    pip install git+https://github.com/TEN-framework/ten-vad.git
+    
 else
-    echo "Using existing virtual environment"
+    echo "Falling back to venv approach..."
+    
+    # Create virtual environment if it doesn't exist
+    if [ ! -d "venv" ]; then
+        echo "Creating virtual environment..."
+        python -m venv venv
+    else
+        echo "Using existing virtual environment"
+    fi
+    
+    # Activate virtual environment
+    echo "Activating virtual environment..."
+    source venv/bin/activate
+    echo "Python: $(which python)"
+    
+    # Install dependencies
+    echo "Installing dependencies..."
+    pip install --upgrade pip
+    pip install --quiet numpy pandas scipy
+    echo "Installing TEN-VAD..."
+    pip install --quiet git+https://github.com/TEN-framework/ten-vad.git
 fi
-
-# Activate virtual environment
-echo "Activating virtual environment..."
-source venv/bin/activate
-echo "Python: $(which python)"
-
-# Fix C++ library compatibility for TEN-VAD
-echo "Setting up C++ library compatibility..."
-mkdir -p temp_lib
-if [ -f "/usr/lib/x86_64-linux-gnu/libstdc++.so.6" ]; then
-    ln -sf /usr/lib/x86_64-linux-gnu/libstdc++.so.6 temp_lib/libc++.so.1
-    export LD_LIBRARY_PATH="$(pwd)/temp_lib:$LD_LIBRARY_PATH"
-    echo "Created libstdc++ -> libc++ compatibility link"
-elif [ -f "/usr/lib64/libstdc++.so.6" ]; then
-    ln -sf /usr/lib64/libstdc++.so.6 temp_lib/libc++.so.1
-    export LD_LIBRARY_PATH="$(pwd)/temp_lib:$LD_LIBRARY_PATH"
-    echo "Created libstdc++ -> libc++ compatibility link"
-else
-    echo "Warning: Could not find libstdc++.so.6"
-fi
-
-# Install dependencies
-echo "Installing dependencies..."
-pip install --upgrade pip
-pip install --quiet numpy pandas scipy
-echo "Installing TEN-VAD..."
-pip install --quiet git+https://github.com/TEN-framework/ten-vad.git
 
 # Test installation
 echo "Testing TEN-VAD installation..."
@@ -93,6 +114,13 @@ python scripts/vad_pipeline.py \
     --data_dir "$DATA_DIR" \
     --workers $SLURM_CPUS_PER_TASK \
     --log_level INFO
+
+# Cleanup conda environment if we created one
+if command -v conda &> /dev/null && [ ! -z "$ENV_NAME" ]; then
+    echo "Cleaning up conda environment: $ENV_NAME"
+    conda deactivate
+    conda env remove -n "$ENV_NAME" -y
+fi
 
 echo "==============================================="
 echo "Job completed successfully at $(date)"
