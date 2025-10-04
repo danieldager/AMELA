@@ -114,6 +114,7 @@ python scripts/vad_pipeline.py \
     --data_dir "$DATA_DIR" \
     --workers $SLURM_CPUS_PER_TASK \
     --log_level INFO
+    --log_name "$SLURM_JOB_ID"
 
 # Cleanup conda environment if we created one
 if command -v conda &> /dev/null && [ ! -z "$ENV_NAME" ]; then
