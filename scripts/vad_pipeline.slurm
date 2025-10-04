@@ -43,8 +43,24 @@ echo "Activating virtual environment..."
 source venv/bin/activate
 echo "Python: $(which python)"
 
+# Fix C++ library compatibility for TEN-VAD
+echo "Setting up C++ library compatibility..."
+mkdir -p temp_lib
+if [ -f "/usr/lib/x86_64-linux-gnu/libstdc++.so.6" ]; then
+    ln -sf /usr/lib/x86_64-linux-gnu/libstdc++.so.6 temp_lib/libc++.so.1
+    export LD_LIBRARY_PATH="$(pwd)/temp_lib:$LD_LIBRARY_PATH"
+    echo "Created libstdc++ -> libc++ compatibility link"
+elif [ -f "/usr/lib64/libstdc++.so.6" ]; then
+    ln -sf /usr/lib64/libstdc++.so.6 temp_lib/libc++.so.1
+    export LD_LIBRARY_PATH="$(pwd)/temp_lib:$LD_LIBRARY_PATH"
+    echo "Created libstdc++ -> libc++ compatibility link"
+else
+    echo "Warning: Could not find libstdc++.so.6"
+fi
+
 # Install dependencies
 echo "Installing dependencies..."
+pip install --upgrade pip
 pip install --quiet numpy pandas scipy
 echo "Installing TEN-VAD..."
 pip install --quiet git+https://github.com/TEN-framework/ten-vad.git
