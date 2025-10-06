@@ -21,12 +21,18 @@ echo "CPUs: $SLURM_CPUS_PER_TASK"
 echo "Python: $(which python) $(python -V)"
 echo "Working directory: $(pwd)"
 
-# # Test installation
+# Install required packages
+echo "Installing required packages..."
+pip install --upgrade pip
+pip install --quiet numpy pandas scipy
+pip install --quiet git+https://github.com/TEN-framework/ten-vad.git
+
+# Test installation
 echo "Testing TEN-VAD installation..."
 python -c "from ten_vad import TenVad; print('TEN-VAD import successful')"
 
 # Set data paths
-SCRIPT_DIR="/scratch2/ddager/almela/scripts
+SCRIPT_DIR="/scratch2/ddager/almela/scripts"
 echo "Scripts directory: $SCRIPT_DIR"
 
 DATA_DIR="/store/projects/InfTrain/dataset/wav/EN_flat"
@@ -44,9 +50,9 @@ fi
 
 # Run the pipeline
 echo "Starting VAD processing with $SLURM_CPUS_PER_TASK workers..."
-python scripts/vad_pipeline.py \
+python "$SCRIPT_DIR/vad_pipeline.py" \
     --data_dir "$DATA_DIR" \
-    --workers $SLURM_CPUS_PER_TASK \
+    --workers "$SLURM_CPUS_PER_TASK" \
     --log_name "$SLURM_JOB_ID" \
     --log_level INFO
 
