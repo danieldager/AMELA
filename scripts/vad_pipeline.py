@@ -143,26 +143,12 @@ def process_single_wav(args):
         return {
             "filename": wav_path.name,
             "error": f"TenVad initialization failed: {str(e)}",
-            "top-file": None,
-            "mid-file": None,
-            "sequence": None,
-            "duration": None,
-            "max-spoken": None,
-            "min-spoken": None,
-            "avg-spoken": None,
-            "max-nospch": None,
-            "min-nospch": None,
-            "avg-nospch": None,
-            "spch-ratio": None,
-            "flagged_ns": None,
-            "flagged_1m": None,
-            "splits": "",
         }
 
     try:
         # Decompose filename (specific to our naming convention)
-        top, _, seq = wav_path.stem.split("-")
-        mid, _, _, _, seq = seq.split("_")
+        speaker, _, sequence = wav_path.stem.split("-")
+        book_id, _, _, _, sequence = sequence.split("_")
 
         # Read wav file - handle both absolute paths and symlinks
         sr, data = Wavfile.read(str(wav_path))
@@ -198,34 +184,22 @@ def process_single_wav(args):
         spoken_secs = runs_to_secs(ones, hop_size, sr)
         nospch_secs = runs_to_secs(zeros, hop_size, sr)
 
-        # Calculate statistics
-        max_spoken = float(spoken_secs.max()) if spoken_secs.size else 0.0
-        min_spoken = float(spoken_secs.min()) if spoken_secs.size else 0.0
-        avg_spoken = float(spoken_secs.mean()) if spoken_secs.size else 0.0
-        max_nospch = float(nospch_secs.max()) if nospch_secs.size else 0.0
-        min_nospch = float(nospch_secs.min()) if nospch_secs.size else 0.0
-        avg_nospch = float(nospch_secs.mean()) if nospch_secs.size else 0.0
-        flagged_ns = bool(spch_ratio < 0.01) or bool(max_spoken < 0.3)
-        flagged_1m = bool(duration >= 60.0)
-
         # Calculate splits for long audio files (>60 seconds)
         splits = find_splits(flags, hop_size, sr) if duration >= 60.0 else ""
 
         return {
             "filename": wav_path.name,
-            "top-file": top,
-            "mid-file": mid,
-            "sequence": seq,
+            "speaker": speaker,
+            "book-id": book_id,
+            "sequence": sequence,
             "duration": duration,
-            "max-spoken": max_spoken,
-            "min-spoken": min_spoken,
-            "avg-spoken": avg_spoken,
-            "max-nospch": max_nospch,
-            "min-nospch": min_nospch,
-            "avg-nospch": avg_nospch,
+            "max-spoken": float(spoken_secs.max()) if spoken_secs.size else 0.0,
+            "min-spoken": float(spoken_secs.min()) if spoken_secs.size else 0.0,
+            "avg-spoken": float(spoken_secs.mean()) if spoken_secs.size else 0.0,
+            "max-nospch": float(nospch_secs.max()) if nospch_secs.size else 0.0,
+            "min-nospch": float(nospch_secs.min()) if nospch_secs.size else 0.0,
+            "avg-nospch": float(nospch_secs.mean()) if nospch_secs.size else 0.0,
             "spch-ratio": spch_ratio,
-            "flagged_ns": flagged_ns,
-            "flagged_1m": flagged_1m,
             "splits": splits,
         }
 
@@ -233,20 +207,6 @@ def process_single_wav(args):
         return {
             "filename": wav_path.name,
             "error": str(e),
-            "top-file": None,
-            "mid-file": None,
-            "sequence": None,
-            "duration": None,
-            "max-spoken": None,
-            "min-spoken": None,
-            "avg-spoken": None,
-            "max-nospch": None,
-            "min-nospch": None,
-            "avg-nospch": None,
-            "spch-ratio": None,
-            "flagged_ns": None,
-            "flagged_1m": None,
-            "splits": "",
         }
 
 

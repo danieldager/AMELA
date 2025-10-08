@@ -12,7 +12,8 @@ wheels/
 
 # Folders
 data/
-outs/
+logs/
 ignore/
 output/
-logs/
+metadata/
+notebooks/
