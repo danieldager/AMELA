@@ -8,7 +8,7 @@ import pandas as pd
 
 def main():
     # Paths
-    chunks_csv = Path("../metadata/chunks.csv")
+    chunks_csv = Path("/scratch2/ddager/amela/metadata/chunks.csv")
     source_base = Path("/store/projects/InfTrain/dataset/wav/EN")
     target_base = Path("/store/projects/lexical-benchmark/audio/symlinks")
 
