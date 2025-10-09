@@ -1,0 +1,17 @@
+plotly
+torch
+torchaudio
+scipy==1.11
+numpy==1.22.0
+numba==0.53.0
+pandas==2.0.3
+llvmlite==0.36
+
+# ten-vad
+ten-vad @ git+https://github.com/TEN-framework/ten-vad.git@aa96832d58a295d97b9a6baa4109a9bede4474f8
+
+# textless
+textless @ git+https://github.com/facebookresearch/textlesslib.git@ba33d669d8284b4f7bfe81e7384e83ab799fe384
+
+# fairseq
+fairseq @ git+https://github.com/pytorch/fairseq.git@dd106d9534b22e7db859a6b87ffd7780c38341f8
