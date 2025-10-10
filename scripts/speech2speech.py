@@ -1,7 +1,12 @@
-import pandas as pd  # type: ignore
+import argparse
+
+import torch
 import torchaudio  # type: ignore
 from textless.data.speech_encoder import SpeechEncoder  # type: ignore
 from textless.vocoders.tacotron import TacotronVocoder  # type: ignore
+
+# Fix for PyTorch 2.6+ weights_only=True default
+torch.serialization.add_safe_globals([argparse.Namespace])
 
 dense_model_name = "hubert-base-ls960"
 quantizer_name, vocab_size = "kmeans", 100
