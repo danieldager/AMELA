@@ -1,15 +1,21 @@
 import argparse
 
+import fairseq.data.dictionary  # type: ignore
 import torch
 import torchaudio  # type: ignore
 from textless.data.speech_encoder import SpeechEncoder  # type: ignore
-from textless.vocoders.tacotron import TacotronVocoder  # type: ignore
+from textless.vocoders.tacotron2.vocoder import TacotronVocoder  # type: ignore
 
-# Fix for PyTorch 2.6+ weights_only=True default
-torch.serialization.add_safe_globals([argparse.Namespace])
+# Allowlist all fairseq classes that might be in checkpoints
+torch.serialization.add_safe_globals(
+    [
+        argparse.Namespace,
+        fairseq.data.dictionary.Dictionary,
+    ]
+)
 
 dense_model_name = "hubert-base-ls960"
-quantizer_name, vocab_size = "kmeans", 100
+quantizer_model_name, vocab_size = "kmeans", 100
 
 # Load hardcoded long wav file, ~120 seconds
 file = "/store/projects/lexical-benchmark/audio/symlinks/50h/05/1087_LibriVox_en_seq_058.wav"
@@ -18,7 +24,7 @@ print(f"Waveform shape: {waveform.shape}, sample rate: {sr}")
 
 encoder = SpeechEncoder.by_name(
     dense_model_name=dense_model_name,
-    quantizer_name=quantizer_name,
+    quantizer_model_name=quantizer_model_name,
     vocab_size=vocab_size,
     deduplicate=True,
 ).cuda()
@@ -35,7 +41,7 @@ print(f"Units shape: {units.shape}, dtype: {units.dtype}")
 
 vocoder = TacotronVocoder.by_name(
     dense_model_name,
-    quantizer_name,
+    quantizer_model_name,
     vocab_size,
 ).cuda()
 
