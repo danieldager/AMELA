@@ -1,6 +1,12 @@
 import argparse
+import warnings
+
+# Silence deprecation warnings
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 import fairseq.data.dictionary  # type: ignore
+import librosa.util  # type: ignore
 import torch
 import torchaudio  # type: ignore
 from textless.data.speech_encoder import SpeechEncoder  # type: ignore
@@ -13,6 +19,16 @@ torch.serialization.add_safe_globals(
         fairseq.data.dictionary.Dictionary,
     ]
 )
+
+
+# Fix librosa.util.pad_center compatibility issue
+def _patched_pad_center(data, size, axis=-1, **kwargs):
+    # librosa 0.10+ changed signature from (data, size) to (data, *, size)
+    return _original_pad_center(data, size=size, axis=axis, **kwargs)
+
+
+_original_pad_center = librosa.util.pad_center
+librosa.util.pad_center = _patched_pad_center
 
 dense_model_name = "hubert-base-ls960"
 quantizer_model_name, vocab_size = "kmeans", 100
