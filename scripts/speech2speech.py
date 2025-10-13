@@ -38,6 +38,7 @@ def _patched_pad_center(data, size, axis=-1, **kwargs):
 librosa.util.pad_center = _patched_pad_center
 
 from textless.data.speech_encoder import SpeechEncoder  # type: ignore
+from textless.vocoders.hifigan.vocoder import CodeHifiGanVocoder  # type: ignore
 from textless.vocoders.tacotron2.vocoder import TacotronVocoder  # type: ignore
 
 # Allowlist all fairseq classes that might be in checkpoints
@@ -51,11 +52,6 @@ torch.serialization.add_safe_globals(
 dense_model_name = "hubert-base-ls960"
 quantizer_model_name, vocab_size = "kmeans", 100
 
-# Load hardcoded long wav file, ~120 seconds
-file = "/store/projects/lexical-benchmark/audio/symlinks/50h/05/1087_LibriVox_en_seq_058.wav"
-waveform, sr = torchaudio.load(file)
-print(f"Waveform shape: {waveform.shape}, sample rate: {sr}")
-
 encoder = SpeechEncoder.by_name(
     dense_model_name=dense_model_name,
     quantizer_model_name=quantizer_model_name,
@@ -63,24 +59,39 @@ encoder = SpeechEncoder.by_name(
     deduplicate=True,
 ).cuda()
 
-encoded = encoder(waveform.cuda())
-
-# encoded is a dict with keys ('dense', 'units', 'durations').
-# inspect encoded
-for k, v in encoded.items():
-    print(f"{k}: {v.shape}")
-
-units = encoded["units"]
-print(f"Units shape: {units.shape}, dtype: {units.dtype}")
-
-vocoder = TacotronVocoder.by_name(
+tacotron = TacotronVocoder.by_name(
     dense_model_name,
     quantizer_model_name,
     vocab_size,
 ).cuda()
 
-audio = vocoder(units)
+hifigan = CodeHifiGanVocoder.by_name(
+    dense_model_name,
+    quantizer_model_name,
+    vocab_size,
+).cuda()
 
-torchaudio.save(
-    "reconstructed.wav", audio.cpu().float().unsqueeze(0), vocoder.output_sample_rate
-)
+vocoders = {
+    "tacotron": tacotron,
+    "hifigan": hifigan,
+}
+
+base = "/store/projects/lexical-benchmark/audio/symlinks/50h/"
+files = [
+    base + "05/1087_LibriVox_en_seq_058.wav",  # 120s
+    base + "05/1087_LibriVox_en_seq_010.wav",  # 30s
+    base + "05/1087_LibriVox_en_seq_000.wav",  # 10s
+    base + "05/1087_LibriVox_en_seq_002.wav",  # 5s
+]
+for file in files:
+    waveform, sr = torchaudio.load(file)
+    encoded = encoder(waveform.cuda())
+    units = encoded["units"]
+
+    for name, vocoder in vocoders.items():
+        audio = vocoder(units)
+        torchaudio.save(
+            f"output/{name}_{file.split('/')[-1]}",
+            audio.cpu().float().unsqueeze(0),
+            vocoder.output_sample_rate,
+        )
