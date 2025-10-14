@@ -5,32 +5,37 @@ import torch  # type: ignore
 import torchaudio  # type: ignore
 
 # Fix omegaconf strict validation for old checkpoints
-# Patch the validation to auto-convert floats like 50.0 to int 50
-# Different omegaconf versions have different method names
-try:
-    # Try omegaconf 2.1+
-    _original_validate = omegaconf.nodes.IntegerNode._validate_and_convert_impl
+# Patch OmegaConf.merge to auto-convert floats to ints BEFORE validation
+_original_merge = omegaconf.OmegaConf.merge
 
-    def _patched_validate(self, value):
-        if isinstance(value, float) and value.is_integer():
-            value = int(value)
-        return _original_validate(self, value)
 
-    omegaconf.nodes.IntegerNode._validate_and_convert_impl = _patched_validate
-except AttributeError:
-    try:
-        # Try omegaconf 2.0.x
-        _original_validate = omegaconf.nodes.IntegerNode._validate_and_convert
+def _patched_merge(*configs):
+    def fix_floats(obj):
+        if isinstance(obj, dict):
+            return {k: fix_floats(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [fix_floats(v) for v in obj]
+        elif isinstance(obj, float) and obj.is_integer():
+            return int(obj)
+        return obj
 
-        def _patched_validate(self, value):
-            if isinstance(value, float) and value.is_integer():
-                value = int(value)
-            return _original_validate(self, value)
+    # Fix floats in dict configs before merging
+    fixed = []
+    for cfg in configs:
+        if hasattr(cfg, "__dict__"):
+            # OmegaConf object - convert to dict, fix, convert back
+            fixed.append(
+                omegaconf.OmegaConf.create(
+                    fix_floats(omegaconf.OmegaConf.to_container(cfg))
+                )
+            )
+        else:
+            fixed.append(cfg)
 
-        omegaconf.nodes.IntegerNode._validate_and_convert = _patched_validate
-    except AttributeError:
-        # If neither works, validation might not be an issue
-        print("Warning: Could not patch omegaconf validation, may encounter issues")
+    return _original_merge(*fixed)
+
+
+omegaconf.OmegaConf.merge = _patched_merge
 
 import fairseq.data.dictionary  # type: ignore
 from textless.data.speech_encoder import SpeechEncoder  # type: ignore
