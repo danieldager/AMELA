@@ -1,8 +1,22 @@
 import argparse
 
-import fairseq.data.dictionary  # type: ignore
-import torch
+import omegaconf  # type: ignore
+import torch  # type: ignore
 import torchaudio  # type: ignore
+
+
+# Fix omegaconf strict validation for old checkpoints
+def _patched_validate(self, value):
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    return _original_validate(self, value)
+
+
+_original_validate = omegaconf.nodes.IntegerNode._validate_and_convert_impl
+omegaconf.nodes.IntegerNode._validate_and_convert_impl = _patched_validate
+
+
+import fairseq.data.dictionary  # type: ignore
 from textless.data.speech_encoder import SpeechEncoder  # type: ignore
 from textless.vocoders.hifigan.vocoder import CodeHiFiGANVocoder  # type: ignore
 from textless.vocoders.tacotron2.vocoder import TacotronVocoder  # type: ignore
