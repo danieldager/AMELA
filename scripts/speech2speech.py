@@ -19,17 +19,20 @@ def _patched_merge(*configs):
             return int(obj)
         return obj
 
-    # Fix floats in dict configs before merging
+    # Fix floats in configs before merging
     fixed = []
     for cfg in configs:
-        if hasattr(cfg, "__dict__"):
-            # OmegaConf object - convert to dict, fix, convert back
-            fixed.append(
-                omegaconf.OmegaConf.create(
-                    fix_floats(omegaconf.OmegaConf.to_container(cfg))
-                )
-            )
-        else:
+        try:
+            # Check if it's an OmegaConf container
+            if hasattr(cfg, "_metadata"):
+                container = omegaconf.OmegaConf.to_container(cfg)
+                fixed.append(omegaconf.OmegaConf.create(fix_floats(container)))
+            elif isinstance(cfg, dict):
+                fixed.append(fix_floats(cfg))
+            else:
+                fixed.append(cfg)
+        except:
+            # If anything fails, use original
             fixed.append(cfg)
 
     return _original_merge(*fixed)
