@@ -6,7 +6,7 @@ Note that if you did not install libc++1, you have to run the code below to inst
 sudo apt update
 sudo apt install libc++1
 
-installing textlesslib
+Installing textlesslib
 
 conda create -n textless python=3.9 -y
 conda activate textless
@@ -16,8 +16,12 @@ pip install -e textlesslib/
 
 pip install git+https://github.com/pytorch/fairseq.git@dd106d9534b22e7db859a6b87ffd7780c38341f8
 
+pip install hydra-core==1.1.2 omegaconf==2.1.2 librosa==0.9.2
+
+srun --partition=gpu --gres=gpu:1 --mem=32G python scripts/speech2speech_clean.py
+
 pip install --no-deps "omegaconf==2.2.3" "hydra-core==1.1.2" "fairseq==0.12.2"
 pip install --no-deps "antlr4-python3-runtime==4.9.3"
 pip install --no-deps bitarray
 
-pip install git+https://github.com/TEN-framework/ten-vad.git@aa96832d58a295d97b9a6baa4109a9bede4474f8  
+pip install git+https://github.com/TEN-framework/ten-vad.git@aa96832d58a295d97b9a6baa4109a9bede4474f8
