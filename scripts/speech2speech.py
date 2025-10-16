@@ -26,6 +26,7 @@ For detailed documentation, see: scripts/README.md
 import argparse
 import time
 import warnings
+import time
 
 import omegaconf  # type: ignore
 import torch  # type: ignore
@@ -36,11 +37,9 @@ warnings.filterwarnings("ignore")
 # Track startup time
 _start_time = time.time()
 
-
 def log_time(msg):
     elapsed = time.time() - _start_time
     print(f"[{elapsed:.2f}s] {msg}", flush=True)
-
 
 log_time("Starting script...")
 
@@ -213,6 +212,9 @@ for vocoder_name, dense_model, quantizer, vocab_size in configs:
         # base + "05/1087_LibriVox_en_seq_010.wav",  # 30s
         # base + "05/1087_LibriVox_en_seq_000.wav",  # 10s
         # base + "05/1087_LibriVox_en_seq_002.wav",  # 5s
+        base + "59/740_LibriVox_en_seq_006.wav",  # 3m
+        base + "08/2314_LibriVox_en_seq_005.wav",  # 4m
+        base + "00/2268_LibriVox_en_seq_13.wav",  # 5m
 
     ]
     for file in files:

@@ -9,6 +9,8 @@ wheels/
 
 # Virtual environments
 .venv
+/venv
+/temp_lib
 
 # Folders
 data/
@@ -16,3 +18,4 @@ logs/
 ignore/
 output/
 notebooks/
+textlesslib/
