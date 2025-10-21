@@ -24,24 +24,13 @@ For detailed documentation, see: scripts/README.md
 """
 
 import argparse
-import time
 import warnings
-import time
 
 import omegaconf  # type: ignore
 import torch  # type: ignore
 import torchaudio  # type: ignore
 
 warnings.filterwarnings("ignore")
-
-# Track startup time
-_start_time = time.time()
-
-def log_time(msg):
-    elapsed = time.time() - _start_time
-    print(f"[{elapsed:.2f}s] {msg}", flush=True)
-
-log_time("Starting script...")
 
 # Fix OmegaConf validation: convert floats to ints in old checkpoints
 _original_merge = omegaconf.OmegaConf.merge
@@ -73,7 +62,6 @@ def _patched_merge(*configs):
 
 
 omegaconf.OmegaConf.merge = _patched_merge
-log_time("OmegaConf patched")
 
 # Register Hydra pkg:// source to avoid errors with old checkpoints
 try:
@@ -94,15 +82,11 @@ try:
 except:
     pass
 
-log_time("Hydra plugin registered")
-
 import fairseq.checkpoint_utils  # type: ignore
 import fairseq.data.dictionary  # type: ignore
 from textless.data.speech_encoder import SpeechEncoder  # type: ignore
 from textless.vocoders.hifigan.vocoder import CodeHiFiGANVocoder  # type: ignore
 from textless.vocoders.tacotron2.vocoder import TacotronVocoder  # type: ignore
-
-log_time("All modules imported")
 
 # Allowlist fairseq classes for PyTorch 2.6+ security
 torch.serialization.add_safe_globals(
@@ -157,26 +141,21 @@ def _patched_load_checkpoint(path, *args, **kwargs):
 fairseq.checkpoint_utils.load_checkpoint_to_cpu = _patched_load_checkpoint
 # End of compatibility fixes
 
-log_time("Checkpoint loading patched")
-
 configs = [
-    # ("tacotron", "hubert-base-ls960", "kmeans", 50),
-    # ("tacotron", "hubert-base-ls960", "kmeans", 100),
-    # ("tacotron", "hubert-base-ls960", "kmeans", 200),
-    # ("tacotron", "cpc-big-ll6k", "kmeans", 50),
-    # ("tacotron", "cpc-big-ll6k", "kmeans", 100),
-    # ("tacotron", "cpc-big-ll6k", "kmeans", 200),
-    # ("hifigan", "mhubert-base-25hz", "kmeans", 500),
-    # ("hifigan", "hubert-base-ls960-layer-9", "kmeans", 500),
-    # ("hifigan", "hubert-base-ls960-layer-9", "kmeans-expresso", 2000),
-    # ("hifigan", "mhubert-base-vp_mls_cv_8lang", "kmeans", 2000),
+    ("tacotron", "hubert-base-ls960", "kmeans", 50),
+    ("tacotron", "hubert-base-ls960", "kmeans", 100),
+    ("tacotron", "hubert-base-ls960", "kmeans", 200),
+    ("tacotron", "cpc-big-ll6k", "kmeans", 50),
+    ("tacotron", "cpc-big-ll6k", "kmeans", 100),
+    ("tacotron", "cpc-big-ll6k", "kmeans", 200),
+    ("hifigan", "mhubert-base-25hz", "kmeans", 500),
+    ("hifigan", "hubert-base-ls960-layer-9", "kmeans", 500),
+    ("hifigan", "hubert-base-ls960-layer-9", "kmeans-expresso", 2000),
+    ("hifigan", "mhubert-base-vp_mls_cv_8lang", "kmeans", 2000),
     ("hifigan", "mhubert-base-vp_mls_cv_8lang", "kmeans-expresso", 2000),
 ]
 
-log_time("Starting model loop...")
-
 for vocoder_name, dense_model, quantizer, vocab_size in configs:
-    log_time(f"Loading encoder: {dense_model}")
     encoder = SpeechEncoder.by_name(
         dense_model_name=dense_model,
         quantizer_model_name=quantizer,
@@ -184,7 +163,6 @@ for vocoder_name, dense_model, quantizer, vocab_size in configs:
         deduplicate=True,
     ).cuda()
 
-    log_time(f"Loading vocoder: {vocoder_name}")
     if vocoder_name == "tacotron":
         vocoder = TacotronVocoder.by_name(
             dense_model,
@@ -203,19 +181,14 @@ for vocoder_name, dense_model, quantizer, vocab_size in configs:
     vocod = vocoder_name[:4]
     model = dense_model.split("-")[0]
     config = f"{vocod}_{model}_{quantizer}_{vocab_size}"
-    log_time(f"Models loaded, starting testing")
     print(f"Testing: {config}")
 
     base = "/store/projects/lexical-benchmark/audio/symlinks/50h/"
     files = [
-        # base + "05/1087_LibriVox_en_seq_058.wav",  # 120s
-        # base + "05/1087_LibriVox_en_seq_010.wav",  # 30s
-        # base + "05/1087_LibriVox_en_seq_000.wav",  # 10s
-        # base + "05/1087_LibriVox_en_seq_002.wav",  # 5s
-        base + "59/740_LibriVox_en_seq_006.wav",  # 3m
-        base + "08/2314_LibriVox_en_seq_005.wav",  # 4m
-        base + "00/2268_LibriVox_en_seq_13.wav",  # 5m
-
+        base + "05/1087_LibriVox_en_seq_058.wav",  # 120s
+        base + "05/1087_LibriVox_en_seq_010.wav",  # 30s
+        base + "05/1087_LibriVox_en_seq_000.wav",  # 10s
+        base + "05/1087_LibriVox_en_seq_002.wav",  # 5s
     ]
     for file in files:
         waveform, sr = torchaudio.load(file)

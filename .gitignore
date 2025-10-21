@@ -19,3 +19,4 @@ ignore/
 output/
 notebooks/
 textlesslib/
+.github/

@@ -3,7 +3,7 @@ import os
 from multiprocessing import Process
 
 import fairseq.data.dictionary  # type: ignore
-import torch
+import torch # type: ignore
 import torchaudio  # type: ignore
 from textless.data.speech_encoder import SpeechEncoder  # type: ignore
 from textless.vocoders.hifigan.vocoder import CodeHiFiGANVocoder  # type: ignore

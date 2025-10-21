@@ -1,209 +1,143 @@
-# Compatibility Fixes for Old Fairseq Checkpoints
+# Technical Documentation
 
-> **Technical Documentation**  
-> This document explains the compatibility issues with old fairseq checkpoints and the solutions implemented.  
-> For installation instructions, see `README.md`.
+Implementation details, compatibility fixes, and advanced patterns for AMELA pipelines.
 
-## The Problem
+## Speech-to-Speech: Legacy Fairseq Compatibility
 
-The textlesslib library uses fairseq checkpoints from 2021 (commit `dd106d9534b22e7db859a6b87ffd7780c38341f8`). These old checkpoints have several compatibility issues with modern Python environments:
+The S2S pipeline uses 2021 fairseq checkpoints with modern PyTorch. Three compatibility issues required fixes:
 
-1. **OmegaConf Type Validation Errors**: Old checkpoints store integer configuration values as floats (e.g., `label_rate: 50.0` instead of `label_rate: 50`). Modern OmegaConf (2.0+) has strict type validation that rejects this.
+### Issue 1: OmegaConf Type Validation
+Old checkpoints store integers as floats (`label_rate: 50.0`). OmegaConf 2.0+ validates strictly and rejects this.
 
-2. **Weight Normalization Incompatibility**: The checkpoint's `encoder.pos_conv` layer uses an old weight normalization format where:
+**Solution**: Monkey-patch `OmegaConf.merge()` to convert floats to ints before validation (see `scripts/sts.py` lines 1-50).
 
-   - `weight_g` has shape `[768, 1, 1]` but the model expects `[1, 1, 128]`
-   - `weight_v` has shape `[768]` but the model expects `[768, 48, 128]`
+### Issue 2: Weight Normalization Shape Mismatch
+Checkpoint's `encoder.pos_conv` weights have incompatible shapes:
+- `weight_g`: `[768, 1, 1]` but model expects `[1, 1, 128]`
+- `weight_v`: `[768]` but model expects `[768, 48, 128]`
 
-   This happens because the checkpoint was saved with an older version of PyTorch's weight normalization.
+**Solution**: Monkey-patch checkpoint loading to remove incompatible keys before loading. Combined with `strict=False`, model reinitializes these weights (~0.1% of parameters, negligible impact).
 
-3. **PyTorch 2.6+ Security**: PyTorch 2.6+ requires explicit allowlisting of classes for safe deserialization to prevent arbitrary code execution.
+### Issue 3: PyTorch 2.6+ Security
+PyTorch now requires explicit allowlisting of classes for deserialization.
 
-### Solutions Implemented
+**Solution**: Register fairseq classes with `torch.serialization.add_safe_globals()`.
 
-#### 1. Modified `textlesslib/textless/data/hubert_feature_reader.py`
+### Implementation Details
 
-**Change**: Added `strict=False` parameter to checkpoint loading.
-
+**Modified file**: `textlesslib/textless/data/hubert_feature_reader.py` line 33
 ```python
-# Line 32-34 (modified)
 model, _, task = fairseq.checkpoint_utils.load_model_ensemble_and_task(
-    [self.checkpoint_path],
-    strict=False,  # Allow loading old checkpoints with incompatible weights
+    [self.checkpoint_path], strict=False  # ADD THIS
 )
 ```
 
-**Why**: This allows the model to load even when some weights are missing or have incompatible shapes. The missing `pos_conv` weights will be randomly initialized, which has minimal impact on model performance since it's just one small positional encoding layer.
+**Monkey patches** in `scripts/sts.py`:
+1. Patch `OmegaConf.merge()` to convert floats → ints
+2. Patch `load_checkpoint_to_cpu()` to remove incompatible weight keys
+3. Register safe classes with `torch.serialization.add_safe_globals()`
 
-#### 2. Monkey-Patched `OmegaConf.merge` in `speech2speech.py`
+**Critical**: Patches must run BEFORE importing fairseq/textless.
 
-**What**: Intercepts `OmegaConf.merge()` calls to convert float values to integers when they represent whole numbers.
-
-```python
-def _patched_merge(*configs):
-    def fix_floats(obj):
-        if isinstance(obj, float) and obj.is_integer():
-            return int(obj)
-        # ... recursively fix dicts and lists
-    # Convert configs and call original merge
+### Required Versions
+```bash
+fairseq @ git+...@dd106d9  # Exact commit textlesslib uses
+omegaconf==2.0.6           # Has II interpolation, not overly strict
+hydra-core==1.0.7          # Compatible with OmegaConf 2.0.x
 ```
 
-**Why**: Old fairseq checkpoints stored config values like `label_rate: 50.0` as floats. OmegaConf 2.0+ validates types strictly and raises `ValidationError: Value '50.0' could not be converted to Integer`. This patch pre-processes configs to fix the types before validation.
+Why not update? Pre-trained checkpoints are tied to this fairseq version. Updating would require retraining models or extensive checkpoint conversion. For research reproducibility, we use exact versions.
 
-#### 3. Monkey-Patched `fairseq.checkpoint_utils.load_checkpoint_to_cpu`
+### Performance Impact
+- Monkey patches: +10ms startup, +50ms model load, 0ms runtime
+- Reinitialized `pos_conv` weights: ~0.1% of parameters, negligible quality impact
 
-**What**: Removes incompatible weight normalization keys from checkpoint state dicts before loading.
+## VAD: Multiprocessing Patterns
 
-```python
-def _patched_load_checkpoint(path, *args, **kwargs):
-    state = _original_load_checkpoint(path, *args, **kwargs)
-
-    # Remove old weight_g/weight_v if they have incompatible shapes
-    if "encoder.pos_conv.0.weight_g" in model_state:
-        weight_g = model_state["encoder.pos_conv.0.weight_g"]
-        if weight_g.dim() == 3 and weight_g.shape[0] != 1:
-            # Remove incompatible keys - model will reinitialize
-            keys_to_remove.extend([
-                "encoder.pos_conv.0.weight_g",
-                "encoder.pos_conv.0.weight_v",
-            ])
-```
-
-**Why**: The old weight normalization format is incompatible with the current model architecture. By removing these keys before loading, combined with `strict=False`, the model initializes these weights randomly instead of crashing.
-
-#### 4. PyTorch Safe Globals Allowlist
-
-**What**: Registers fairseq classes as safe for deserialization.
+VAD uses TEN-VAD which cannot be pickled. **Solution**: Initialize model per-process.
 
 ```python
-torch.serialization.add_safe_globals([
-    argparse.Namespace,
-    fairseq.data.dictionary.Dictionary,
-])
+# WRONG: Model instance can't be passed through executor
+model = TenVad()
+with ProcessPoolExecutor() as executor:
+    executor.map(process_func, files, repeat(model))  # FAILS
+
+# CORRECT: Initialize per-process
+def process_func(args):
+    model = TenVad()  # Each worker gets own instance
+    return model.process(args)
+
+with ProcessPoolExecutor() as executor:
+    executor.map(process_func, files)  # WORKS
 ```
 
-**Why**: PyTorch 2.6+ prevents loading arbitrary classes from pickled files for security. Fairseq checkpoints contain these classes, so we must explicitly allow them.
+See `scripts/vad.py` function `process_wavs_optimized()` for full implementation.
 
-## Required Dependencies
+## ASR: GPU Memory Auto-Tuning
 
-### Critical Version Requirements
-
-These specific versions are required for compatibility:
+The SLURM script detects GPU memory and adjusts batch size:
 
 ```bash
-# Fairseq (specific commit from 2021)
-pip install git+https://github.com/pytorch/fairseq.git@dd106d9534b22e7db859a6b87ffd7780c38341f8
-
-# OmegaConf and Hydra (compatible versions)
-pip install 'omegaconf>=2.0,<2.1'  # Need 2.0+ for II interpolation, <2.1 for compatibility
-pip install 'hydra-core>=1.0,<1.1'  # Hydra 1.0.x series
-
-# PyTorch (modern version)
-# Use whatever version is appropriate for your CUDA setup
+GPU_MEM=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits)
+if [ "$GPU_MEM" -gt 70000 ]; then BATCH_SIZE=16; fi    # A100 80GB
+elif [ "$GPU_MEM" -gt 35000 ]; then BATCH_SIZE=8; fi   # A100 40GB
+else BATCH_SIZE=4; fi                                   # V100 32GB
 ```
 
-**Why these versions?**
+These are conservative. Actual memory usage depends on audio length and max tokens. Monitor with `nvidia-smi` and adjust.
 
-- **fairseq @ dd106d9**: This is the commit that textlesslib was developed against. Newer fairseq versions have breaking changes.
-- **OmegaConf 2.0.x**: Provides `II` (interpolation) feature needed by fairseq, but 2.1+ has stricter validation that causes more issues.
-- **Hydra 1.0.x**: Compatible with OmegaConf 2.0.x. Hydra 1.1+ requires OmegaConf 2.1+.
+## ASR: Parallel Processing with Job Arrays
 
-### Why Not Just Update Everything?
+For large datasets, use embarrassingly parallel approach (not DDP):
 
-You might wonder: "Why not just update fairseq, textlesslib, and the checkpoints to modern versions?"
+1. **Split manifest** into N splits
+2. **Submit job array** with N tasks, each gets 1 GPU
+3. **Merge results** after completion
 
-**Reasons:**
-
-1. **Checkpoint Compatibility**: The pre-trained model checkpoints (HuBERT, mHuBERT, etc.) were created with this specific fairseq version. Loading them with newer fairseq versions may cause subtle bugs or performance degradation.
-
-2. **Textlesslib Development**: The library was developed and tested against this specific fairseq commit. Updating fairseq would require extensive testing and potential code changes.
-
-3. **Breaking Changes**: Fairseq has had numerous breaking changes since 2021. Updating would require:
-
-   - Retraining or converting all checkpoints
-   - Updating textlesslib code
-   - Extensive validation that results match
-
-4. **Research Reproducibility**: For research purposes, using the exact versions ensures reproducible results matching published papers.
-
-## Alternative Approaches Considered
-
-### 1. Downgrading Hydra/OmegaConf to older versions
-
-- **Tried**: OmegaConf 1.4.x + Hydra 0.11.x
-- **Problem**: Missing `II` interpolation feature that fairseq requires
-- **Result**: ImportError on startup
-
-### 2. Upgrading fairseq to latest version
-
-- **Problem**: Latest fairseq has different APIs and model architectures
-- **Result**: Would require retraining all models or extensive checkpoint conversion
-
-### 3. Direct checkpoint state dict modification
-
-- **Problem**: Can't modify downloaded checkpoints (cached in `~/.textless`)
-- **Result**: Would need to intercept loading, which is what we do with monkey-patching
-
-### 4. Patching Hydra source registry
-
-- **Tried**: Registering dummy `pkg://` schema handler
-- **Problem**: Python import system already bound the functions before patching
-- **Result**: Patches weren't effective
-
-## Usage
+This is simpler than DDP for inference, fault-tolerant (rerun individual failed tasks), and scales to 100+ GPUs.
 
 ```bash
-# Make sure you're in the textless conda environment
-conda activate textless
-
-# Run the script
-srun --partition=gpu --gres=gpu:1 --mem=32G python scripts/speech2speech.py
+python scripts/split_manifest.py --input data.json --splits 30
+export SPLITS_DIR="splits"
+sbatch --array=0-29 scripts/asr.slurm
+python scripts/merge_results.py --input-pattern "output/*_split_*.json" --output final.json
 ```
 
-## Files Modified
+See scripts for implementation details. For future **training** workloads (LSTM/Transformer grid search), you'll need `torch.distributed` with DDP.
 
-1. **`scripts/speech2speech.py`**: Main script with monkey-patches
-2. **`textlesslib/textless/data/hubert_feature_reader.py`**: Added `strict=False` to line 33
+## HPC Best Practices
 
-## Troubleshooting
+### SLURM Script Pattern
+1. **Validation** - Check inputs exist before expensive operations
+2. **Environment** - Install deps in job (dependencies change, not pre-built)
+3. **Auto-optimization** - Detect resources, adjust parameters
+4. **Execution** - Run with logging
 
-### Error: "Value 'X.0' could not be converted to Integer"
+### Data Manifests
+- Always use **absolute paths** (compute nodes have different $PWD)
+- Use **JSONL format** (one JSON per line, no top-level array)
+- Include **metadata** (duration, etc.) for progress estimation
 
-- **Cause**: OmegaConf validation error
-- **Fix**: Ensure OmegaConf monkey-patch is applied (should be automatic in speech2speech.py)
+### Multiprocessing
+- For CPU-bound: Use `ProcessPoolExecutor`, workers = CPU count
+- For GPU-bound: Use job arrays, 1 GPU per task
+- For non-picklable objects: Initialize per-process/per-task
 
-### Error: "size mismatch for encoder.pos_conv.0.weight_g"
+## Common Errors & Solutions
 
-- **Cause**: Weight normalization incompatibility
-- **Fix**: Ensure `strict=False` is in `hubert_feature_reader.py` and checkpoint patch is applied
-
-### Error: "No config source registered for schema pkg"
-
-- **Cause**: Hydra version too new or too old
-- **Fix**: Use `hydra-core>=1.0,<1.1`
-
-### Error: "cannot import name 'II' from 'omegaconf'"
-
-- **Cause**: OmegaConf version too old
-- **Fix**: Use `omegaconf>=2.0,<2.1`
-
-## Performance Impact
-
-The monkey-patches have minimal performance impact:
-
-- **OmegaConf patch**: Only runs during config loading (startup time), adds ~10ms
-- **Checkpoint patch**: Only runs once per model load, adds ~50ms
-- **Runtime**: No impact on inference speed
-
-The randomly initialized `pos_conv` weights have negligible impact on model quality since:
-
-- It's only one small layer (positional encoding)
-- The rest of the model (99.9%+) uses pre-trained weights
-- In practice, output quality is indistinguishable from the fully pre-trained model
+| Error | Cause | Fix |
+|-------|-------|-----|
+| `Value 'X.0' could not be converted to Integer` | OmegaConf validation | Check monkey-patch in sts.py |
+| `size mismatch for encoder.pos_conv` | Weight shape incompatibility | Add `strict=False` in hubert_feature_reader.py |
+| `cannot import name 'II'` | OmegaConf too old | `pip install 'omegaconf==2.0.6'` |
+| `No config source for pkg` | Hydra version | `pip install 'hydra-core==1.0.7'` |
+| ASR CUDA OOM | Batch size too large | Reduce in asr.slurm |
+| VAD hangs | Model not picklable | Initialize per-process |
+| Empty transcriptions | Audio >40s | Split files or filter manifest |
 
 ## References
 
-- [Textlesslib GitHub](https://github.com/facebookresearch/textlesslib)
-- [Fairseq GitHub](https://github.com/pytorch/fairseq)
-- [OmegaConf Documentation](https://omegaconf.readthedocs.io/)
-- [Hydra Documentation](https://hydra.cc/)
+- [Textlesslib](https://github.com/facebookresearch/textlesslib)
+- [Fairseq](https://github.com/pytorch/fairseq)
+- [TEN-VAD](https://github.com/TEN-framework/ten-vad)
+- [NeMo](https://github.com/NVIDIA/NeMo)
