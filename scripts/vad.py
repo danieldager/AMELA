@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Enhanced VAD Pipeline for HPC/SLURM environments
-Adds command-line arguments, better logging, and progress tracking
+VAD Pipeline for audio processing with multiprocessing support.
+Dataset-agnostic: processes any directory structure, stores absolute paths.
 """
 
 import argparse
-import logging
+import json
 import multiprocessing as mp
 import sys
 import time
@@ -15,26 +15,10 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import scipy.io.wavfile as Wavfile
-from ten_vad import TenVad
-
-
-def setup_logging(log_name: str, log_level="INFO"):
-    """Setup logging configuration."""
-
-    # Create log file
-    logs_dir = Path("logs")
-    log_file = logs_dir / f"{log_name}.log"
-
-    logging.basicConfig(
-        level=getattr(logging, log_level.upper()),
-        format="%(asctime)s - %(levelname)s - %(message)s",
-        handlers=[
-            logging.StreamHandler(sys.stdout),
-            logging.FileHandler(log_file),
-        ],
-    )
-    return logging.getLogger(__name__)
+import soundfile as sf
+import torch
+import torchaudio
+from ten_vad import TenVad  # type: ignore
 
 
 def get_runs(flags):
@@ -70,11 +54,11 @@ def runs_to_secs(runs, hop_size, sr):
     return (frame_lengths * (hop_size / sr)).astype(np.float32, copy=False)
 
 
-def find_splits(flags, hop_size, sr):
+def find_splits(flags, hop_size, sr, target_interval=30.0):
     """
     Find optimal split points for long audio files.
 
-    Looks for non-speech runs of at least 300ms starting around 30-second intervals,
+    Looks for non-speech runs of at least 300ms starting around target_interval,
     and places split points at the middle of suitable non-speech segments.
 
     Args:
@@ -87,9 +71,8 @@ def find_splits(flags, hop_size, sr):
     """
     splits = []
 
-    # Convert timing constants to frames
-    target_interval_frames = int(30.0 * sr / hop_size)  # ~30 seconds in frames
-    min_silence_frames = int(0.3 * sr / hop_size)  # 300ms in frames
+    target_interval_frames = int(target_interval * sr / hop_size)
+    min_silence_frames = int(0.3 * sr / hop_size)
 
     # Start looking for splits after the first 30 seconds
     current_pos = target_interval_frames
@@ -136,47 +119,50 @@ def process_single_wav(args):
     wav_path, hop_size, threshold = args
 
     try:
-        # Initialize model (each process gets its own)
-        # This can fail if TEN-VAD isn't properly installed
+        # Each process gets its own instance
         TV = TenVad(hop_size=hop_size, threshold=threshold)
     except Exception as e:
         return {
-            "filename": wav_path.name,
+            "audio_filepath": str(wav_path),
             "error": f"TenVad initialization failed: {str(e)}",
         }
 
     try:
-        # Decompose filename (specific to our naming convention)
-        speaker, _, sequence = wav_path.stem.split("-")
-        book_id, _, _, _, sequence = sequence.split("_")
+        # Read audio file
+        data, sr = sf.read(str(wav_path), dtype='float32')
 
-        # Read wav file - handle both absolute paths and symlinks
-        sr, data = Wavfile.read(str(wav_path))
-
-        # Ensure data is in the right format (mono, int16/float32)
+        # Convert to mono if stereo
         if len(data.shape) > 1:
-            data = data[:, 0]  # Take first channel if stereo
+            data = data.mean(axis=1)
+
+        # Resample to 16kHz if needed (TenVAD expects 16kHz)
+        TARGET_SR = 16000
+        if sr != TARGET_SR:
+            # Convert to torch tensor for resampling
+            data_tensor = torch.from_numpy(data).unsqueeze(0)  # Add channel dim
+            data_tensor = torchaudio.functional.resample(
+                data_tensor, orig_freq=sr, new_freq=TARGET_SR
+            )
+            data = data_tensor.squeeze(0).numpy()  # Remove channel dim, back to numpy
+            sr = TARGET_SR
+
+        # Convert to int16 for TenVAD
+        data = (data * 32767).astype(np.int16)
 
         duration = len(data) / sr
 
-        # Vectorized frame extraction
+        # Process frames
         num_frames = len(data) // hop_size
         if num_frames == 0:
-            raise ValueError(
-                f"Audio too short for hop_size {hop_size}: {len(data)} samples"
-            )
+            raise ValueError(f"Audio too short for hop_size {hop_size}: {len(data)} samples")
+        
         frames = data[: num_frames * hop_size].reshape(-1, hop_size)
-
-        # Pre-allocate arrays for better memory efficiency
-        # probs = np.empty(num_frames, dtype=np.float32)
         flags = np.empty(num_frames, dtype=np.uint8)
 
-        # Process frames - cache the process method for speed
         process_func = TV.process
         for i in range(num_frames):
             _, flags[i] = process_func(frames[i])
 
-        # Calculate speech ratio
         spch_ratio = float(flags.mean())
 
         # Calculate runs and durations
@@ -184,14 +170,11 @@ def process_single_wav(args):
         spoken_secs = runs_to_secs(ones, hop_size, sr)
         nospch_secs = runs_to_secs(zeros, hop_size, sr)
 
-        # Calculate splits for long audio files (>60 seconds)
-        splits = find_splits(flags, hop_size, sr) if duration >= 60.0 else ""
+        # Find splits for long files
+        splits = find_splits(flags, hop_size, sr, target_interval=30.0) if duration >= 30.0 else ""
 
         return {
-            "filename": wav_path.name,
-            "speaker": speaker,
-            "book-id": book_id,
-            "sequence": sequence,
+            "audio_filepath": str(wav_path),
             "duration": duration,
             "max-spoken": float(spoken_secs.max()) if spoken_secs.size else 0.0,
             "min-spoken": float(spoken_secs.min()) if spoken_secs.size else 0.0,
@@ -205,48 +188,24 @@ def process_single_wav(args):
 
     except Exception as e:
         return {
-            "filename": wav_path.name,
+            "audio_filepath": str(wav_path),
             "error": str(e),
         }
 
 
-def process_wavs_optimized(
-    WAVS, hop_size=256, threshold=0.5, max_workers=None, logger=None
-):
-    """
-    Optimized VAD processing with multiple performance improvements.
-
-    Args:
-        WAVS: List of wav file paths
-        hop_size: Hop size for processing
-        threshold: VAD threshold
-        max_workers: Number of processes (None for auto-detection)
-        logger: Logger instance
-
-    Returns:
-        List of results dictionaries
-    """
-    if logger is None:
-        logger = logging.getLogger(__name__)
-
-    if max_workers is None:
-        max_workers = mp.cpu_count()
-
-    logger.info(f"Using {max_workers} parallel workers for {len(WAVS)} files")
-
-    # Prepare arguments for multiprocessing
-    args_list = [(wav, hop_size, threshold) for wav in WAVS]
-
+def process_wavs_parallel(wavs, hop_size, threshold, max_workers):
+    """Process WAV files in parallel across multiple workers."""
+    
+    args_list = [(wav, hop_size, threshold) for wav in wavs]
+    
     results = []
     completed = 0
     errors = 0
-    total = len(WAVS)
+    total = len(wavs)
     hundredth = max(1, total // 100)
     start_time = time.time()
 
-    # Use ProcessPoolExecutor for parallel processing
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all jobs
         future_to_wav = {
             executor.submit(process_single_wav, args): args[0] for args in args_list
         }
@@ -260,7 +219,7 @@ def process_wavs_optimized(
                 elapsed = time.time() - start_time
                 rate = completed / elapsed
                 eta = (total - completed) / rate if rate > 0 else 0
-                logger.info(
+                print(
                     f"Progress: {completed}/{total} ({completed/total*100:.1f}%) "
                     f"Rate: {rate:.1f} files/sec ETA: {eta:.0f}s"
                 )
@@ -270,19 +229,17 @@ def process_wavs_optimized(
                 if result is not None:
                     if "error" in result:
                         errors += 1
-                        logger.warning(
-                            f"Error processing {wav_path.name}: {result['error']}"
-                        )
+                        print(f"WARNING: Error processing {wav_path.name}: {result['error']}", file=sys.stderr)
                     results.append(result)
             except Exception as e:
                 errors += 1
-                logger.error(f"Exception with {wav_path}: {e}")
+                print(f"ERROR: Exception with {wav_path}: {e}", file=sys.stderr)
 
     elapsed = time.time() - start_time
-    logger.info(f"Completed processing {len(results)}/{total} files in {elapsed:.1f}s")
+    print(f"Completed processing {len(results)}/{total} files in {elapsed:.1f}s")
 
     if errors > 0:
-        logger.warning(f"Encountered {errors} errors during processing")
+        print(f"WARNING: Encountered {errors} errors during processing", file=sys.stderr)
 
     return results
 
@@ -290,16 +247,16 @@ def process_wavs_optimized(
 def main():
     parser = argparse.ArgumentParser(description="VAD Pipeline for audio processing")
     parser.add_argument(
-        "--data_dir",
-        "-i",
-        default="data/EN_flat",
-        help="Input directory containing WAV files (default: data/EN_flat)",
+        "input",
+        type=str,
+        help="Directory containing WAV files (searches recursively)",
     )
     parser.add_argument(
         "--output",
         "-o",
+        type=str,
         default=None,
-        help="Output CSV file (default: auto-generated in output/ folder)",
+        help="Output base path (default: metadata/<dirname>_<timestamp>). Creates .csv and .json",
     )
     parser.add_argument(
         "--hop_size",
@@ -318,83 +275,90 @@ def main():
         "-w",
         type=int,
         default=None,
-        help="Number of parallel workers (default: auto)",
-    )
-    parser.add_argument(
-        "--log_name",
-        type=str,
-        default=None,
-        help="Log filename (default: auto-generated by slurm)",
-    )
-    parser.add_argument(
-        "--log_level",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-        default="INFO",
-        help="Logging level (default: INFO)",
+        help="Number of parallel workers (default: auto-detect from CPUs)",
     )
     args = parser.parse_args()
 
-    # Setup logging
-    logger = setup_logging(args.log_name, args.log_level)
-
-    # Create output directory and filename
-    if args.output is None:
-        # day month year
-        timestamp = datetime.now().strftime("%d-%m-%Y")
-        output_dir = Path("output")
-        output_dir.mkdir(exist_ok=True)
-        output_file = output_dir / f"manifest_{timestamp}.csv"
-    else:
-        output_file = Path(args.output)
-        output_file.parent.mkdir(parents=True, exist_ok=True)
-
     # Validate input directory
-    data_dir = Path(args.data_dir)
+    data_dir = Path(args.input).resolve()
     if not data_dir.exists():
-        logger.error(f"Input directory does not exist: {data_dir}")
+        print(f"ERROR: Input directory does not exist: {data_dir}", file=sys.stderr)
         sys.exit(1)
 
-    # Find WAV files
+    # Find WAV files recursively
     wavs = list(data_dir.rglob("*.wav"))
     if not wavs:
-        logger.error(f"No WAV files found in {data_dir}")
+        print(f"ERROR: No WAV files found in {data_dir}", file=sys.stderr)
         sys.exit(1)
-    logger.info(f"Found {len(wavs)} WAV files in {data_dir}")
+    
+    print(f"Found {len(wavs)} WAV files in {data_dir}")
+
+    # Auto-detect workers
+    if args.workers is None:
+        args.workers = mp.cpu_count()
+    print(f"Using {args.workers} parallel workers")
+
+    # Determine output files
+    if args.output is None:
+        timestamp = datetime.now().strftime("%d-%m-%y")
+        output_dir = Path("metadata")
+        output_dir.mkdir(exist_ok=True)
+        dirname = data_dir.name
+        output_base = output_dir / f"{dirname}_{timestamp}"
+    else:
+        output_base = Path(args.output)
+        output_base.parent.mkdir(parents=True, exist_ok=True)
+    
+    output_csv = output_base.with_suffix('.csv')
+    output_jsonl = output_base.with_suffix('.json')
 
     # Process files
     try:
-        results = process_wavs_optimized(
+        results = process_wavs_parallel(
             wavs,
-            hop_size=args.hop_size,
-            threshold=args.threshold,
-            max_workers=args.workers,
-            logger=logger,
+            args.hop_size,
+            args.threshold,
+            args.workers,
         )
 
-        # Save results
         if not results:
-            logger.error("No results generated - all files failed processing")
+            print("ERROR: No results generated - all files failed processing", file=sys.stderr)
             sys.exit(1)
 
         df = pd.DataFrame(results)
-        df.to_csv(output_file, index=False)
-        logger.info(f"Results saved to {output_file}")
+        
+        # Save full CSV
+        df.to_csv(output_csv, index=False)
+        print(f"Full results saved to {output_csv}")
 
-        # Calculate success rate
+        # Save JSONL with only audio_filepath and duration
+        with open(output_jsonl, 'w') as f:
+            for _, row in df.iterrows():
+                if pd.isna(row.get('error')):
+                    entry = {
+                        "audio_filepath": row["audio_filepath"],
+                        "duration": row["duration"]
+                    }
+                    f.write(json.dumps(entry) + '\n')
+        
+        print(f"JSONL manifest saved to {output_jsonl}")
+
+        # Report statistics
         if "error" in df.columns:
             successful = df[df["error"].isna()]
-            errors = df[df["error"].notna()]
-            logger.info(f"Successfully processed: {len(successful)}/{len(df)} files")
-            if len(errors) > 0:
-                logger.warning(f"Failed files: {len(errors)}")
-                # Log a few examples of errors
-                for _, row in errors.head(3).iterrows():
-                    logger.warning(f"  {row['filename']}: {row['error']}")
+            errors_df = df[df["error"].notna()]
+            print(f"Successfully processed: {len(successful)}/{len(df)} files")
+            if len(errors_df) > 0:
+                print(f"WARNING: Failed files: {len(errors_df)}", file=sys.stderr)
+                for _, row in errors_df.head(5).iterrows():
+                    print(f"  {Path(row['audio_filepath']).name}: {row['error']}", file=sys.stderr)
         else:
-            logger.info(f"Successfully processed: {len(df)} files")
+            print(f"Successfully processed: {len(df)} files")
 
     except Exception as e:
-        logger.error(f"Pipeline failed: {e}")
+        print(f"ERROR: Pipeline failed: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
 
 
