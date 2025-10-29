@@ -171,7 +171,7 @@ def process_single_wav(args):
         nospch_secs = runs_to_secs(zeros, hop_size, sr)
 
         # Find splits for long files
-        splits = find_splits(flags, hop_size, sr, target_interval=30.0) if duration >= 30.0 else ""
+        splits = find_splits(flags, hop_size, sr) if duration >= 30.0 else ""
 
         return {
             "audio_filepath": str(wav_path),
@@ -247,7 +247,7 @@ def process_wavs_parallel(wavs, hop_size, threshold, max_workers):
 def main():
     parser = argparse.ArgumentParser(description="VAD Pipeline for audio processing")
     parser.add_argument(
-        "input",
+        "dataset",
         type=str,
         help="Directory containing WAV files (searches recursively)",
     )
@@ -279,19 +279,19 @@ def main():
     )
     args = parser.parse_args()
 
-    # Validate input directory
-    data_dir = Path(args.input).resolve()
-    if not data_dir.exists():
-        print(f"ERROR: Input directory does not exist: {data_dir}", file=sys.stderr)
+    # Validate dataset directory
+    dataset = Path(args.dataset).resolve()
+    if not dataset.exists():
+        print(f"ERROR: Dataset does not exist: {dataset}", file=sys.stderr)
         sys.exit(1)
 
     # Find WAV files recursively
-    wavs = list(data_dir.rglob("*.wav"))
+    wavs = list(dataset.rglob("*.wav"))
     if not wavs:
-        print(f"ERROR: No WAV files found in {data_dir}", file=sys.stderr)
+        print(f"ERROR: No WAV files found in {dataset}", file=sys.stderr)
         sys.exit(1)
     
-    print(f"Found {len(wavs)} WAV files in {data_dir}")
+    print(f"Found {len(wavs)} WAV files in {dataset}")
 
     # Auto-detect workers
     if args.workers is None:
@@ -303,14 +303,14 @@ def main():
         timestamp = datetime.now().strftime("%d-%m-%y")
         output_dir = Path("metadata")
         output_dir.mkdir(exist_ok=True)
-        dirname = data_dir.name
+        dirname = dataset.name
         output_base = output_dir / f"{dirname}_{timestamp}"
     else:
         output_base = Path(args.output)
         output_base.parent.mkdir(parents=True, exist_ok=True)
     
     output_csv = output_base.with_suffix('.csv')
-    output_jsonl = output_base.with_suffix('.json')
+    output_jsonl = output_base.with_suffix('.jsonl')
 
     # Process files
     try:

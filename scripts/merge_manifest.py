@@ -1,88 +1,89 @@
 #!/usr/bin/env python3
 """
-Merge ASR task outputs back into original manifest.
+Merge ASR task outputs into final manifests.
+
+Auto-detects transcription directories in metadata/ folder.
+Each .{name}_transcriptions/ folder produces output/{name}.jsonl
 
 Usage:
-    python merge_manifest.py --manifest metadata/expresso.json
+    python merge_manifest.py
 """
 
-import argparse
 import json
+import shutil
 from pathlib import Path
 
 
-def merge_transcriptions(manifest_path: str):
-    """Merge per-task transcription files into manifest."""
+def merge_transcriptions(transcriptions_dir: Path):
+    """Merge per-task transcription files into final manifest."""
     
-    manifest_path_obj = Path(manifest_path)
-    transcriptions_dir = manifest_path_obj.parent / f".{manifest_path_obj.stem}_transcriptions"
+    # Extract dataset name
+    dataset_name = transcriptions_dir.name[1:].replace('_transcriptions', '')
     
-    if not transcriptions_dir.exists():
-        print(f"ERROR: No transcriptions directory found: {transcriptions_dir}")
-        return
+    output_dir = Path('output')
+    output_dir.mkdir(exist_ok=True)
+    output_path = output_dir / f"{dataset_name}.jsonl"
     
-    # Load all task outputs
-    print(f"Loading task outputs from {transcriptions_dir}")
+    print(f"========================================")
+    print(f"Merging: {transcriptions_dir.name}")
+    print(f"Output:  {output_path}")
+    print(f"========================================")
+    
+    # Load all task files
     all_transcriptions = {}
-    
     task_files = sorted(transcriptions_dir.glob("task_*.json"))
+    
     if not task_files:
-        print(f"ERROR: No task files found in {transcriptions_dir}")
-        return
+        print(f"ERROR: No task files found")
+        return False
     
     print(f"Found {len(task_files)} task files")
     for task_file in task_files:
-        with open(task_file, 'r') as f:
+        with open(task_file) as f:
             content = f.read().strip()
-            if content:  # Skip empty files
-                task_transcriptions = json.loads(content)
-                all_transcriptions.update(task_transcriptions)
+            if content:
+                all_transcriptions.update(json.loads(content))
+                print(f"  {task_file.name}: {len(json.loads(content))} entries")
     
-    print(f"Loaded {len(all_transcriptions)} transcriptions")
+    print(f"Total: {len(all_transcriptions)} transcriptions")
     
-    # Read original manifest
-    with open(manifest_path, 'r') as f:
-        entries = [json.loads(line) for line in f]
+    # Write merged manifest
+    with open(output_path, 'w') as f:
+        for audio_path, text in all_transcriptions.items():
+            f.write(json.dumps({"audio_filepath": audio_path, "text": text}) + '\n')
+
+    # Clean up
+    shutil.rmtree(transcriptions_dir)
     
-    # Update entries with transcriptions
-    updated_count = 0
-    for entry in entries:
-        audio_path = entry["audio_filepath"]
-        if audio_path in all_transcriptions:
-            entry["text"] = all_transcriptions[audio_path]
-            updated_count += 1
-    
-    # Write updated manifest
-    print(f"Writing updated manifest with {updated_count} transcriptions")
-    with open(manifest_path, 'w') as f:
-        for entry in entries:
-            f.write(json.dumps(entry) + '\n')
-    
-    print(f"Manifest updated: {manifest_path}")
-    print(f"Transcriptions added: {updated_count}/{len(entries)}")
-    
-    # Clean up transcription files
-    print(f"Removing transcription directory: {transcriptions_dir}")
-    for task_file in task_files:
-        task_file.unlink()
-    transcriptions_dir.rmdir()
-    
-    print("Done!")
+    return True
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Merge ASR task outputs into manifest"
-    )
-    parser.add_argument(
-        "--manifest",
-        type=str,
-        required=True,
-        help="Path to JSONL manifest"
-    )
+    metadata_dir = Path('metadata')
     
-    args = parser.parse_args()
-    merge_transcriptions(args.manifest)
+    # Find all transcription directories
+    transcription_dirs = sorted([
+        d for d in metadata_dir.iterdir()
+        if d.is_dir() and d.name.startswith('.') and d.name.endswith('_transcriptions')
+    ])
+    
+    if not transcription_dirs:
+        print("No transcription directories found in metadata/")
+        print("Looking for: .{name}_transcriptions/")
+        return
+    
+    print(f"Found {len(transcription_dirs)} transcription directories\n")
+    
+    # Merge each directory into its own manifest
+    success_count = 0
+    for trans_dir in transcription_dirs:
+        if merge_transcriptions(trans_dir):
+            success_count += 1
+        print()
+    
+    print(f"========================================")
+    print(f"Successfully merged: {success_count}/{len(transcription_dirs)}")
+    print(f"========================================")
 
 
 if __name__ == "__main__":

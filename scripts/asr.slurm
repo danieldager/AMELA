@@ -2,12 +2,12 @@
 #SBATCH --job-name=asr_array
 #SBATCH --output=logs/asr_%A_%a.out
 #SBATCH --error=logs/asr_%A_%a.err
-#SBATCH --array=0-15%7              # 16 tasks, max 7 running (adjust to your GPU count)
+#SBATCH --array=0-5%3
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
 #SBATCH --time=12:00:00
-#SBATCH --partition=gpu,erc-dupoux
+#SBATCH --partition=gpu,erc-dupoux,erc-cristia
 
 # Validate inputs
 if [ -z "$1" ]; then
@@ -41,7 +41,7 @@ echo "=========================================="
 
 # Activate conda environment
 source ~/.bashrc
-conda activate asr
+conda activate canary
 
 # Auto-detect batch size based on GPU memory
 BATCH_SIZE=8
@@ -58,7 +58,7 @@ if command -v nvidia-smi &> /dev/null; then
 fi
 
 # Run ASR script
-python scripts/asr.py \
+python -u scripts/asr.py \
     --manifest "$MANIFEST_PATH" \
     --task-id "$TASK_ID" \
     --num-tasks "$NUM_TASKS" \

@@ -2,10 +2,10 @@
 #SBATCH --job-name=sts_array
 #SBATCH --output=logs/sts_%A_%a.out
 #SBATCH --error=logs/sts_%A_%a.err
-#SBATCH --array=0                   
-#SBATCH --gres=gpu:1                # 1 GPU per task
-#SBATCH --cpus-per-task=4           # Reduced from 4 (encoding/decoding don't need many CPUs)
-#SBATCH --mem=16G                   # Reduced from 16G (model is ~2GB, data streaming)
+#SBATCH --array=0
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=32G
 #SBATCH --time=12:00:00
 #SBATCH --partition=gpu,erc-dupoux  # Use both GPU partitions
 
