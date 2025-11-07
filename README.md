@@ -73,7 +73,7 @@ pip install -e textlesslib/
 pip install git+https://github.com/pytorch/fairseq.git@dd106d9534b22e7db859a6b87ffd7780c38341f8
 
 # Install dependencies with exact versions
-pip install 'omegaconf==2.0.6' 'hydra-core==1.0.7'
+pip install 'omegaconf==2.0.6' 'hydra-core==1.0.7' h5py pandas==1.5.3
 ```
 
 **Critical Fix**: Edit `textlesslib/textless/data/hubert_feature_reader.py` line 32:
@@ -243,6 +243,72 @@ tail -f logs/vad_JOBID.out
 # Check for errors
 grep ERROR logs/*.err
 ```
+
+---
+
+## Pipeline 4: LSTM Language Model Training
+
+**What it does**: Trains LSTM models on discrete audio tokens for language modeling.
+
+**Environment**: Uses `textless` conda environment (same as STS pipeline)
+
+**Prerequisites**: Audio tokens from encoding pipeline (`.pt` files in `output/librivox_mhubert_expresso_2000/`)
+
+### Setup
+
+Already configured if you've set up the STS pipeline. Uses the same `textless` environment.
+
+### Usage
+
+**Single training run**:
+```bash
+python scripts/train.py \
+    --manifest metadata/librivox_29-10-25.csv \
+    --tokens_dir output/librivox_mhubert_expresso_2000 \
+    --embedding_dim 256 \
+    --hidden_size 512 \
+    --num_layers 2 \
+    --dropout 0.1 \
+    --batch_size 32 \
+    --learning_rate 0.001 \
+    --num_epochs 100 \
+    --early_stopping 10
+```
+
+**Grid search with SLURM** (recommended):
+```bash
+# Submit array job - tests 16 hyperparameter combinations in parallel
+sbatch scripts/train.slurm \
+    metadata/librivox_29-10-25.csv \
+    output/librivox_mhubert_expresso_2000
+
+# Monitor progress
+tail -f logs/train_JOBID_TASKID.out
+```
+
+**Outputs**:
+- `checkpoints/lstm_r{lr}_h{hidden}_e{emb}_l{layers}_b{batch}_d{dropout}/` - Model checkpoints
+- `logs/train_JOBID_TASKID.out` - Training logs
+
+**Default Grid Search** (edit `train.slurm` to customize):
+- `embedding_dim`: [128, 256]
+- `hidden_size`: [256, 512]
+- `num_layers`: [2, 3]
+- `dropout`: [0.1, 0.2]
+
+Total: 16 combinations tested in parallel
+
+**Key Features**:
+- **Nested Tensors**: Efficient variable-length sequences (no padding waste)
+- **Memory Optimization**: Loads dataset into RAM (~3GB) for speed
+  - Use `--load_on_the_fly` flag if memory-constrained
+- **Early Stopping**: Stops after 10 epochs without improvement
+- **Automatic Checkpointing**: Saves best model based on validation loss
+
+**Token Format**:
+- Vocab: 0-1999 (mHuBERT k-means clusters)
+- SOS token: 2000 (prepended to all sequences)
+- Total vocabulary: 2001 tokens
 
 ---
 

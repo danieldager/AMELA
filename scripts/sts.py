@@ -80,7 +80,7 @@ try:
 
     # Try to register (may fail silently if already registered or not needed)
     try:
-        Plugins.instance().register(PkgSearchPathPlugin)
+        Plugins.instance().register(PkgSearchPathPlugin)  # type: ignore
     except:
         pass
 except:
