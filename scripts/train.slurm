@@ -2,20 +2,18 @@
 #SBATCH --job-name=lstm_train
 #SBATCH --output=logs/train_%A_%a.out
 #SBATCH --error=logs/train_%A_%a.err
-#SBATCH --array=0-15  # UPDATE THIS: (total_combinations - 1)
+#SBATCH --array=0-2
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
 #SBATCH --time=24:00:00
 #SBATCH --partition=gpu,erc-dupoux,erc-cristia
-
-# Usage: sbatch train.slurm <manifest_path> <tokens_dir>
-# Example: sbatch train.slurm metadata/librivox_29-10-25.csv output/librivox_mhubert_expresso_2000
+#SBATCH --export=ALL
 
 # Validate inputs
 if [ -z "$1" ] || [ -z "$2" ]; then
-    echo "Usage: sbatch train.slurm <manifest_path> <tokens_dir>"
-    echo "Example: sbatch train.slurm metadata/librivox_29-10-25.csv output/librivox_mhubert_expresso_2000"
+    echo "Usage: sbatch scripts/train.slurm <manifest_path> <tokens_dir>"
+    echo "Example: sbatch scripts/train.slurm metadata/librivox_29-10-25.csv output/librivox_mhubert_expresso_2000"
     exit 1
 fi
 
@@ -39,17 +37,12 @@ TASK_ID=${SLURM_ARRAY_TASK_ID:-0}
 # ========================================
 # GRID SEARCH CONFIGURATION
 # ========================================
-# Modify these arrays to customize your hyperparameter search.
-# After editing, update --array=0-N above where N = (product of all array lengths) - 1
-#
-# Current configuration: 2*2*2*2*1*1 = 16 combinations
-#
-EMBEDDING_DIMS=(128 256)
-HIDDEN_SIZES=(256 512)
-NUM_LAYERS=(2 3)
-DROPOUTS=(0.1 0.2)
-BATCH_SIZES=(32)
-LEARNING_RATES=(0.001)
+EMBEDDING_DIMS=(256)
+HIDDEN_SIZES=(128 256 512)
+NUM_LAYERS=(2)
+DROPOUTS=(0.1)
+BATCH_SIZES=(256)
+LEARNING_RATES=(0.0003)
 # ========================================
 
 # Calculate total combinations
@@ -112,7 +105,7 @@ echo "=========================================="
 echo "LSTM Training - Grid Search"
 echo "=========================================="
 echo "Job ID: $SLURM_JOB_ID"
-echo "Array Task ID: $TASK_ID / $TOTAL_COMBINATIONS"
+echo "Array Task ID: {$TASK_ID+1} / $TOTAL_COMBINATIONS"
 echo "Manifest: $MANIFEST_PATH"
 echo "Tokens: $TOKENS_DIR"
 echo "Node: $SLURMD_NODENAME"
@@ -130,7 +123,8 @@ echo "=========================================="
 
 # Activate conda environment
 source ~/.bashrc
-conda activate textless
+conda activate amela_train
+
 
 # Run training script
 python -u scripts/train.py \
@@ -143,8 +137,8 @@ python -u scripts/train.py \
     --batch_size "$BATCH_SIZE" \
     --learning_rate "$LEARNING_RATE" \
     --num_epochs 100 \
-    --train_ratio 0.9 \
-    --early_stopping 10 \
+    --train_ratio 0.95 \
+    --early_stopping 15 \
     --seed 42 \
     --device cuda
 

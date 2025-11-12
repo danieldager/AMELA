@@ -17,9 +17,21 @@ import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import Dataset
-from transformers import Trainer, TrainingArguments, EarlyStoppingCallback
+from transformers import Trainer, TrainingArguments, EarlyStoppingCallback, TrainerCallback
 
 from lstm import LSTM, LSTMConfig
+
+
+class PerplexityCallback(TrainerCallback):
+    """Callback to compute and log perplexity during training."""
+    
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        """Compute perplexity from loss."""
+        if logs is not None:
+            if "loss" in logs:
+                logs["perplexity"] = np.exp(logs["loss"])
+            if "eval_loss" in logs:
+                logs["eval_perplexity"] = np.exp(logs["eval_loss"])
 
 
 def set_seed(seed: int = 42):
@@ -59,6 +71,7 @@ class TokenDataset(Dataset):
         self.tokens_dir = Path(tokens_dir)
         self.sos_token_id = sos_token_id
         self.load_on_the_fly = load_on_the_fly
+        self.missing_files = []  # Track missing files
         
         # Load manifest
         df = pd.read_csv(manifest_path)
@@ -80,19 +93,34 @@ class TokenDataset(Dataset):
         else:
             raise ValueError(f"split must be 'train' or 'val', got {split}")
         
-        print(f"{split.capitalize()} dataset: {len(file_ids)} files")
+        print(f"{split.capitalize()} dataset: {len(file_ids)} files from manifest")
         
         if self.load_on_the_fly:
-            # Store file IDs only, load from disk in __getitem__
-            self.file_ids = file_ids
+            # Check which files exist, keep only valid ones
+            valid_file_ids = []
+            for file_id in file_ids:
+                token_path = self.tokens_dir / f"{file_id}.pt"
+                if token_path.exists():
+                    valid_file_ids.append(file_id)
+                else:
+                    self.missing_files.append(file_id)
+            
+            self.file_ids = valid_file_ids
+            print(f"Found {len(self.file_ids)} existing files (skipped {len(self.missing_files)} missing)")
             print(f"Will load sequences on-the-fly from disk")
         else:
             # Load all sequences into memory with SOS prepended (default, faster)
-            print(f"Loading {len(file_ids)} sequences into memory...")
+            print(f"Loading sequences into memory...")
             self.sequences = []
             
             for file_id in file_ids:
                 token_path = self.tokens_dir / f"{file_id}.pt"
+                
+                # Skip if file doesn't exist
+                if not token_path.exists():
+                    self.missing_files.append(file_id)
+                    continue
+                
                 tokens = torch.load(token_path)
                 
                 # Ensure 1D tensor
@@ -105,7 +133,7 @@ class TokenDataset(Dataset):
                 
                 self.sequences.append(complete_sequence)
             
-            print(f"Loaded {len(self.sequences)} sequences into memory")
+            print(f"Loaded {len(self.sequences)} sequences into memory (skipped {len(self.missing_files)} missing)")
     
     def __len__(self):
         return len(self.sequences) if not self.load_on_the_fly else len(self.file_ids)
@@ -314,6 +342,12 @@ def main():
         load_on_the_fly=args.load_on_the_fly,
     )
     print()
+    
+    # Collect all missing files
+    all_missing_files = train_dataset.missing_files + val_dataset.missing_files
+    if all_missing_files:
+        print(f"WARNING: {len(all_missing_files)} files missing from {args.tokens_dir}")
+        print("(See end of training log for full list)\n")
 
     # Create model config
     config = LSTMConfig(
@@ -345,7 +379,7 @@ def main():
         learning_rate=args.learning_rate,
         
         # Evaluate, save, and log every epoch
-        evaluation_strategy="epoch",
+        eval_strategy="epoch",
         save_strategy="epoch",
         logging_strategy="epoch",
         
@@ -374,7 +408,10 @@ def main():
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
         data_collator=collate_fn,
-        callbacks=[EarlyStoppingCallback(early_stopping_patience=args.early_stopping)],
+        callbacks=[
+            EarlyStoppingCallback(early_stopping_patience=args.early_stopping),
+            PerplexityCallback(),
+        ],
     )
     
     # Train
@@ -390,17 +427,29 @@ def main():
     print("Training Complete")
     print("=" * 60)
     print(f"Final train loss: {train_result.training_loss:.4f}")
+    print(f"Final train perplexity: {np.exp(train_result.training_loss):.2f}")
     
     # Get best validation loss
     eval_result = trainer.evaluate()
     print(f"Final eval loss: {eval_result['eval_loss']:.4f}")
+    print(f"Final eval perplexity: {np.exp(eval_result['eval_loss']):.2f}")
     
     # Find best epoch from logs
-    if hasattr(trainer.state, 'best_metric'):
+    if hasattr(trainer.state, 'best_metric') and trainer.state.best_metric is not None:
         print(f"Best eval loss: {trainer.state.best_metric:.4f}")
+        print(f"Best eval perplexity: {np.exp(trainer.state.best_metric):.2f}")
     
     print(f"Completed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 60)
+    
+    # Print missing files at the end
+    if all_missing_files:
+        print("\n" + "=" * 60)
+        print(f"MISSING FILES ({len(all_missing_files)} total)")
+        print("=" * 60)
+        for file_id in all_missing_files:
+            print(f"  {file_id}")
+        print("=" * 60)
 
 
 if __name__ == "__main__":

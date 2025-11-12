@@ -5,6 +5,8 @@ LSTM language model for audio token sequences.
 Uses torch.nested_tensor for efficient variable-length sequence handling.
 """
 
+from typing import Union, Optional
+
 import torch
 from torch import nn
 from transformers import PretrainedConfig, PreTrainedModel
@@ -77,8 +79,8 @@ class LSTM(PreTrainedModel):
     
     def forward(
         self,
-        inputs: torch.Tensor | torch.nested.nested_tensor,
-        labels: torch.Tensor | torch.nested.nested_tensor | None = None,
+        inputs: torch.Tensor,
+        labels: Optional[torch.Tensor] = None,
         return_dict: bool = True,
     ):
         """Forward pass with nested tensor support.
@@ -91,8 +93,8 @@ class LSTM(PreTrainedModel):
         Returns:
             Dict with 'loss' and 'logits' if return_dict=True, else tuple
         """
-        # Check if we're using nested tensors
-        is_nested = isinstance(inputs, torch.nested.nested_tensor)
+        # Check if we're using nested tensors by checking if it's a nested tensor
+        is_nested = inputs.is_nested
     
         embeddings = self.embedding(inputs)
         lstm_output, _ = self.lstm(embeddings)
@@ -123,8 +125,8 @@ class LSTM(PreTrainedModel):
     
     def _compute_nested_loss(
         self,
-        logits: torch.nested.nested_tensor,
-        labels: torch.nested.nested_tensor,
+        logits: torch.Tensor,
+        labels: torch.Tensor,
     ) -> torch.Tensor:
         """Compute loss for nested tensors by converting to packed format.
         
@@ -154,11 +156,12 @@ class LSTM(PreTrainedModel):
             seq_len = shift_labels.size(0)
             
             # Accumulate weighted by sequence length
-            total_loss += seq_loss * seq_len
+            total_loss += seq_loss.item() * seq_len
             total_tokens += seq_len
         
-        # Return average loss per token
-        return total_loss / total_tokens if total_tokens > 0 else torch.tensor(0.0)
+        # Return average loss per token as tensor
+        avg_loss = total_loss / total_tokens if total_tokens > 0 else 0.0
+        return torch.tensor(avg_loss, device=logits.device)
     
     def generate(
         self,

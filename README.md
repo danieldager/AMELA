@@ -250,13 +250,17 @@ grep ERROR logs/*.err
 
 **What it does**: Trains LSTM models on discrete audio tokens for language modeling.
 
-**Environment**: Uses `textless` conda environment (same as STS pipeline)
+**Environment**: Python 3.10+, GPU recommended
 
 **Prerequisites**: Audio tokens from encoding pipeline (`.pt` files in `output/librivox_mhubert_expresso_2000/`)
 
 ### Setup
 
-Already configured if you've set up the STS pipeline. Uses the same `textless` environment.
+```bash
+conda create -n amela_train python=3.10 -y
+conda activate amela_train
+pip install torch pandas numpy transformers accelerate
+```
 
 ### Usage
 
