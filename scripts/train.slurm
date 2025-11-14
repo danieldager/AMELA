@@ -2,10 +2,12 @@
 #SBATCH --job-name=lstm_train
 #SBATCH --output=logs/train_%A_%a.out
 #SBATCH --error=logs/train_%A_%a.err
-#SBATCH --array=0-2
-#SBATCH --gres=gpu:1
+#SBATCH --array=0-0
+#SBATCH --nodes=1
+#SBATCH --gres=gpu:3
+#SBATCH --ntasks-per-node=3
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=32G
+#SBATCH --mem=64G
 #SBATCH --time=24:00:00
 #SBATCH --partition=gpu,erc-dupoux,erc-cristia
 #SBATCH --export=ALL
@@ -34,14 +36,21 @@ mkdir -p logs
 
 TASK_ID=${SLURM_ARRAY_TASK_ID:-0}
 
+# Detect number of GPUs
+NUM_GPUS=$(nvidia-smi --list-gpus | wc -l)
+
+# Activate conda environment
+source ~/.bashrc
+conda activate amela_train
+
 # ========================================
 # GRID SEARCH CONFIGURATION
 # ========================================
-EMBEDDING_DIMS=(256)
-HIDDEN_SIZES=(128 256 512)
-NUM_LAYERS=(2)
+EMBEDDING_DIMS=(1024)
+HIDDEN_SIZES=(2048)
+NUM_LAYERS=(3)
 DROPOUTS=(0.1)
-BATCH_SIZES=(256)
+BATCH_SIZES=(64)
 LEARNING_RATES=(0.0003)
 # ========================================
 
@@ -102,32 +111,35 @@ BATCH_SIZE=${BATCH_SIZES[$bs_idx]}
 LEARNING_RATE=${LEARNING_RATES[$lr_idx]}
 
 echo "=========================================="
-echo "LSTM Training - Grid Search"
+echo "LSTM Training (DDP)"
 echo "=========================================="
-echo "Job ID: $SLURM_JOB_ID"
-echo "Array Task ID: {$TASK_ID+1} / $TOTAL_COMBINATIONS"
-echo "Manifest: $MANIFEST_PATH"
-echo "Tokens: $TOKENS_DIR"
-echo "Node: $SLURMD_NODENAME"
-echo "GPU: $CUDA_VISIBLE_DEVICES"
-echo "Started: $(date)"
-echo "=========================================="
-echo "Hyperparameters:"
-echo "  embedding_dim:  $EMBEDDING_DIM"
-echo "  hidden_size:    $HIDDEN_SIZE"
-echo "  num_layers:     $NUM_LAYERS"
-echo "  dropout:        $DROPOUT"
-echo "  batch_size:     $BATCH_SIZE"
-echo "  learning_rate:  $LEARNING_RATE"
+echo "Job: $SLURM_JOB_ID | Task: $((TASK_ID + 1))/$TOTAL_COMBINATIONS"
+echo "Model: lstm_h${HIDDEN_SIZE}_r${LEARNING_RATE}_e${EMBEDDING_DIM}l${NUM_LAYERS}_b${BATCH_SIZE}_d${DROPOUT}"
+echo "Data: $(basename $MANIFEST_PATH)"
+echo "Node: $SLURMD_NODENAME | GPUs: $NUM_GPUS"
 echo "=========================================="
 
-# Activate conda environment
-source ~/.bashrc
-conda activate amela_train
+# Auto-detect precision based on GPU
+GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader,nounits | head -n1)
+if [[ "$GPU_NAME" == *"A100"* ]] || [[ "$GPU_NAME" == *"H100"* ]]; then
+    PRECISION_FLAG="--use_bf16"
+else
+    PRECISION_FLAG="--use_fp16"
+fi
+echo "GPU: $GPU_NAME (${PRECISION_FLAG#--use_})"
 
+# DDP environment variables
+export OMP_NUM_THREADS=4
+export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128
+export PYTHONUNBUFFERED=1
 
-# Run training script
-python -u scripts/train.py \
+echo "Launching training..."
+
+torchrun \
+    --standalone \
+    --nnodes=1 \
+    --nproc_per_node=$NUM_GPUS \
+    scripts/train.py \
     --manifest "$MANIFEST_PATH" \
     --tokens_dir "$TOKENS_DIR" \
     --embedding_dim "$EMBEDDING_DIM" \
@@ -138,15 +150,11 @@ python -u scripts/train.py \
     --learning_rate "$LEARNING_RATE" \
     --num_epochs 100 \
     --train_ratio 0.95 \
-    --early_stopping 15 \
+    --early_stopping 5 \
     --seed 42 \
-    --device cuda
+    --gradient_accumulation_steps 4 \
+    --dataloader_num_workers 4 \
+    --group_by_length \
+    $PRECISION_FLAG
 
-EXIT_CODE=$?
-
-echo "=========================================="
-echo "Task $TASK_ID completed: $(date)"
-echo "Exit code: $EXIT_CODE"
-echo "=========================================="
-
-exit $EXIT_CODE
+echo "Completed: $(date) (exit code: $?)"

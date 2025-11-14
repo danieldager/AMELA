@@ -19,5 +19,6 @@ ignore/
 output/
 metadata/
 notebooks/
+checkpoints/
 textlesslib/
 .github/

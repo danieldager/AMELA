@@ -7,7 +7,7 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
 #SBATCH --time=12:00:00
-#SBATCH --partition=gpu,erc-dupoux  # Use both GPU partitions
+#SBATCH --partition=gpu,erc-dupoux,erc-cristia
 
 # Validate inputs
 if [ -z "$1" ] || [ -z "$2" ]; then

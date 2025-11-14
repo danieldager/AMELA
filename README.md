@@ -307,12 +307,86 @@ Total: 16 combinations tested in parallel
 - **Memory Optimization**: Loads dataset into RAM (~3GB) for speed
   - Use `--load_on_the_fly` flag if memory-constrained
 - **Early Stopping**: Stops after 10 epochs without improvement
-- **Automatic Checkpointing**: Saves best model based on validation loss
+- **Automatic Checkpointing**: Saves best 3 checkpoints based on validation loss
 
 **Token Format**:
 - Vocab: 0-1999 (mHuBERT k-means clusters)
 - SOS token: 2000 (prepended to all sequences)
 - Total vocabulary: 2001 tokens
+
+---
+
+## Pipeline 5: LSTM Generation & Synthesis
+
+**What it does**: Generates audio token sequences from trained LSTM models and synthesizes them to audio.
+
+**Environments**: 
+- Generation: `amela_train` (Python 3.10+, GPU recommended)
+- Synthesis: `sts` (Python 3.9, GPU required)
+
+**Prerequisites**: Trained LSTM model in `checkpoints/`
+
+### Generate Tokens
+
+**Single model**:
+```bash
+# Generate with default parameters
+sbatch scripts/generate.slurm lstm_r0.0003_h512_e256_l2_b256_d0.1
+
+# Generate from specific checkpoint
+sbatch scripts/generate.slurm lstm_r0.0003_h512_e256_l2_b256_d0.1 5
+```
+
+**Multiple models** (array job):
+```bash
+# Edit MODELS array in generate.slurm, then:
+sbatch --array=0-2 scripts/generate.slurm
+```
+
+**Custom parameters**:
+```bash
+conda activate amela_train
+python scripts/generate.py \
+    --model lstm_r0.0003_h512_e256_l2_b256_d0.1 \
+    --num_samples 10 \
+    --temperatures 0.7,1.0,1.3 \
+    --top_k 50,None \
+    --top_p 0.95,None \
+    --max_length 500
+```
+
+**Outputs**:
+- `output/generations/{model_name}/temp0.8_topk50_topp0.9_00001.pt` - Token files
+- `output/generations/{model_name}/generation_log.csv` - Generation metadata
+
+### Synthesize Audio
+
+**After token generation**:
+```bash
+# Synthesize all .pt files in a directory
+sbatch scripts/synthesize.slurm output/generations/lstm_r0.0003_h512_e256_l2_b256_d0.1
+
+# Overwrite existing .wav files
+sbatch scripts/synthesize.slurm output/generations/lstm_r0.0003_h512_e256_l2_b256_d0.1 --overwrite
+```
+
+**Outputs**:
+- `.wav` files created next to each `.pt` file (16kHz, same naming)
+
+**Default Generation Grid**:
+- `temperatures`: [0.8, 1.0, 1.2]
+- `top_k`: [50, 100, None]
+- `top_p`: [0.9, 0.95, None]
+- `num_samples`: 5 per combination
+- `max_length`: 500 tokens (~20 seconds at 25 Hz)
+
+Total: 45 samples per model (3×3×3×5)
+
+**Key Features**:
+- **Auto SOS Stripping**: Synthesis automatically removes SOS token before vocoding
+- **Internal SOS Detection**: Flags if SOS appears mid-sequence (logged in CSV)
+- **Resume-Friendly**: Synthesis skips existing .wav files unless `--overwrite`
+- **Flexible Sampling**: Customize temperature, top-k, top-p per run
 
 ---
 

@@ -9,7 +9,10 @@ Usage:
 """
 
 import argparse
+import os
 import random
+import time
+import warnings
 from pathlib import Path
 from datetime import datetime
 
@@ -17,21 +20,80 @@ import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import Dataset
+from torch.nn.utils.rnn import pad_sequence
 from transformers import Trainer, TrainingArguments, EarlyStoppingCallback, TrainerCallback
+import transformers.trainer_callback
 
-from lstm import LSTM, LSTMConfig
+from models import LSTM, LSTMConfig
+
+# Suppress warnings
+warnings.filterwarnings("ignore", message="Could not estimate the number of tokens")
+warnings.filterwarnings("ignore", message=".*barrier.*device_id.*")
 
 
-class PerplexityCallback(TrainerCallback):
-    """Callback to compute and log perplexity during training."""
+# Constants
+NUM_AUDIO_TOKENS = 2000  # mHuBERT/EnCodec codebook size
+SOS_TOKEN_ID = NUM_AUDIO_TOKENS
+PAD_TOKEN_ID = NUM_AUDIO_TOKENS + 1
+VOCAB_SIZE = NUM_AUDIO_TOKENS + 2
+
+
+# DDP helper: Check if we're in distributed mode and get rank
+def is_main_process():
+    """Return True if this is rank 0 or not using DDP."""
+    local_rank = int(os.environ.get("LOCAL_RANK", -1))
+    return local_rank == -1 or local_rank == 0
+
+
+class FormattedLoggingCallback(TrainerCallback):
+    """Minimal callback for clean epoch logging."""
+    
+    def __init__(self):
+        self.header_printed = False
+        self.train_logs = {}
+        self.t_start = None
+    
+    def on_epoch_begin(self, args, state, control, **kwargs):
+        self.t_start = time.time()
+        self.train_logs = {}
     
     def on_log(self, args, state, control, logs=None, **kwargs):
-        """Compute perplexity from loss."""
-        if logs is not None:
-            if "loss" in logs:
-                logs["perplexity"] = np.exp(logs["loss"])
-            if "eval_loss" in logs:
-                logs["eval_perplexity"] = np.exp(logs["eval_loss"])
+        if not logs:
+            return
+        
+        # Only print on main process (rank 0)
+        if not is_main_process():
+            return
+        
+        # Buffer training metrics
+        if "loss" in logs and "eval_loss" not in logs:
+            self.train_logs = logs.copy()
+            return
+        
+        # Print when we have eval metrics
+        if "eval_loss" not in logs:
+            return
+        
+        # Print header once
+        if not self.header_printed:
+            print("\nepoch     loss       ppl  val_loss   val_ppl  epoch_s         lr")
+            print("-----  -------  --------  --------  --------  -------  ---------")
+            self.header_printed = True
+        
+        # Calculate total epoch time
+        epoch_s = int(time.time() - self.t_start) if self.t_start else 0
+        
+        # Extract values
+        epoch = logs.get("epoch", 0)
+        loss = self.train_logs.get("loss", 0)
+        ppl = np.exp(loss) if loss else 0
+        val_loss = logs.get("eval_loss", 0)
+        val_ppl = np.exp(val_loss) if val_loss else 0
+        lr = self.train_logs.get("learning_rate", 0)
+        
+        # Print formatted row
+        print(f"{epoch:5.2f}  {loss:7.4f}  {ppl:8.1f}  {val_loss:8.4f}  {val_ppl:8.1f}  "
+              f"{epoch_s:7}  {lr:9.6f}", flush=True)
 
 
 def set_seed(seed: int = 42):
@@ -47,145 +109,86 @@ def set_seed(seed: int = 42):
 class TokenDataset(Dataset):
     """Dataset for loading audio tokens from .pt files."""
     
-    def __init__(
-        self,
-        manifest_path: str,
-        tokens_dir: str,
-        split: str = "train",
-        train_ratio: float = 0.9,
-        sos_token_id: int = 2000,
-        seed: int = 42,
-        load_on_the_fly: bool = False,
-    ):
-        """Initialize dataset.
-        
-        Args:
-            manifest_path: Path to CSV manifest with file_id column
-            tokens_dir: Directory containing .pt token files
-            split: 'train' or 'val'
-            train_ratio: Fraction of data for training (rest for validation)
-            sos_token_id: ID of start-of-sequence token to prepend
-            seed: Random seed for reproducible split
-            load_on_the_fly: Load tokens from disk on-the-fly instead of caching in memory (default: False)
-        """
+    def __init__(self, manifest_path, tokens_dir, split="train", train_ratio=0.9, seed=42, max_seq_len=3000):
         self.tokens_dir = Path(tokens_dir)
-        self.sos_token_id = sos_token_id
-        self.load_on_the_fly = load_on_the_fly
-        self.missing_files = []  # Track missing files
+        self.max_seq_len = max_seq_len
         
-        # Load manifest
+        # Load and split manifest
         df = pd.read_csv(manifest_path)
-        
         if "file_id" not in df.columns:
-            raise ValueError(f"Manifest must have 'file_id' column. Found: {df.columns.tolist()}")
+            raise ValueError(f"Manifest must have 'file_id' column")
         
-        # Shuffle and split
         file_ids = df["file_id"].tolist()
         rng = random.Random(seed)
         rng.shuffle(file_ids)
         
         split_idx = int(len(file_ids) * train_ratio)
+        file_ids = file_ids[:split_idx] if split == "train" else file_ids[split_idx:]
         
-        if split == "train":
-            file_ids = file_ids[:split_idx]
-        elif split == "val":
-            file_ids = file_ids[split_idx:]
-        else:
-            raise ValueError(f"split must be 'train' or 'val', got {split}")
-        
-        print(f"{split.capitalize()} dataset: {len(file_ids)} files from manifest")
-        
-        if self.load_on_the_fly:
-            # Check which files exist, keep only valid ones
-            valid_file_ids = []
-            for file_id in file_ids:
-                token_path = self.tokens_dir / f"{file_id}.pt"
-                if token_path.exists():
-                    valid_file_ids.append(file_id)
-                else:
-                    self.missing_files.append(file_id)
-            
-            self.file_ids = valid_file_ids
-            print(f"Found {len(self.file_ids)} existing files (skipped {len(self.missing_files)} missing)")
-            print(f"Will load sequences on-the-fly from disk")
-        else:
-            # Load all sequences into memory with SOS prepended (default, faster)
+        if is_main_process():
+            print(f"{split.capitalize()} dataset: {len(file_ids)} files")
             print(f"Loading sequences into memory...")
-            self.sequences = []
+        
+        # Load all sequences into memory
+        self.sequences = []
+        truncated = 0
+        skipped_invalid = [] # To track skipped files
+        
+        for file_id in file_ids:
+            token_path = self.tokens_dir / f"{file_id}.pt"
+            if not token_path.exists():
+                continue
             
-            for file_id in file_ids:
-                token_path = self.tokens_dir / f"{file_id}.pt"
-                
-                # Skip if file doesn't exist
-                if not token_path.exists():
-                    self.missing_files.append(file_id)
-                    continue
-                
-                tokens = torch.load(token_path)
-                
-                # Ensure 1D tensor
-                if tokens.ndim > 1:
-                    tokens = tokens.squeeze()
-                
-                # Prepend SOS token
-                sos_tensor = torch.tensor([self.sos_token_id], dtype=tokens.dtype)
-                complete_sequence = torch.cat([sos_tensor, tokens])
-                
-                self.sequences.append(complete_sequence)
+            tokens = torch.load(token_path).squeeze().long()
             
-            print(f"Loaded {len(self.sequences)} sequences into memory (skipped {len(self.missing_files)} missing)")
+            # Skip invalid tokens (0-d tensors or empty sequences)
+            if tokens.ndim == 0 or len(tokens) == 0:
+                skipped_invalid.append((file_id, tokens.ndim, len(tokens) if tokens.ndim > 0 else 0))
+                continue
+            
+            if len(tokens) > self.max_seq_len:
+                tokens = tokens[:self.max_seq_len]
+                truncated += 1
+            
+            # Prepend SOS
+            sequence = torch.cat([torch.tensor([SOS_TOKEN_ID], dtype=torch.long), tokens])
+            self.sequences.append(sequence)
+        
+        if is_main_process():
+            print(f"Loaded {len(self.sequences)} sequences")
+            if truncated > 0:
+                print(f"Truncated {truncated} sequences to max length {self.max_seq_len}")
+            if skipped_invalid: # Warn about skipped invalid files
+                print(f"WARNING: Skipped {len(skipped_invalid)} invalid files (0-d tensor or empty)")
+                for file_id, ndim, length in skipped_invalid[:5]:  # Show first 5
+                    print(f"  {file_id}: ndim={ndim}, len={length}")
+                if len(skipped_invalid) > 5:
+                    print(f"  ... and {len(skipped_invalid) - 5} more")
     
     def __len__(self):
-        return len(self.sequences) if not self.load_on_the_fly else len(self.file_ids)
+        return len(self.sequences)
     
     def __getitem__(self, idx):
-        """Return sequence (pre-loaded from memory or loaded on-the-fly)."""
-        if self.load_on_the_fly:
-            # Load from disk
-            file_id = self.file_ids[idx]
-            token_path = self.tokens_dir / f"{file_id}.pt"
-            tokens = torch.load(token_path)
-            
-            # Ensure 1D tensor
-            if tokens.ndim > 1:
-                tokens = tokens.squeeze()
-            
-            # Prepend SOS token
-            sos_tensor = torch.tensor([self.sos_token_id], dtype=tokens.dtype)
-            return torch.cat([sos_tensor, tokens])
-        else:
-            # Return from pre-loaded memory
-            return self.sequences[idx]
+        return {"input_ids": self.sequences[idx]}
 
 
 def collate_fn(batch):
-    """Collate variable-length sequences into nested tensor.
+    """Collate variable-length sequences with padding."""
     
-    Args:
-        batch: List of 1D token tensors with different lengths
-        
-    Returns:
-        Dict with 'inputs' and 'labels' as nested tensors
-    """
-    # Create nested tensor from variable-length sequences
-    nested_tensor = torch.nested.nested_tensor(batch)
+    sequences = [item["input_ids"] for item in batch]
+    lengths = torch.tensor([len(seq) for seq in sequences], dtype=torch.long)
+    padded_batch = pad_sequence(sequences, batch_first=True, padding_value=PAD_TOKEN_ID)
     
     return {
-        "inputs": nested_tensor,
-        "labels": nested_tensor,  # Same tensor; shifting happens in model
+        "inputs": padded_batch,
+        "labels": padded_batch,
+        "lengths": lengths,
     }
 
 
-def create_checkpoint_name(
-    learning_rate: float,
-    hidden_size: int,
-    embedding_dim: int,
-    num_layers: int,
-    batch_size: int,
-    dropout: float,
-) -> str:
-    """Create descriptive checkpoint directory name from hyperparameters."""
-    return f"lstm_r{learning_rate}_h{hidden_size}_e{embedding_dim}_l{num_layers}_b{batch_size}_d{dropout}"
+def create_checkpoint_name(learning_rate, hidden_size, embedding_dim, num_layers, batch_size, dropout):
+    """Create checkpoint directory name from hyperparameters."""
+    return f"lstm_h{hidden_size}_r{learning_rate}_e{embedding_dim}_l{num_layers}_b{batch_size}_d{dropout}"
 
 
 def main():
@@ -272,17 +275,39 @@ def main():
         default=42,
         help="Random seed (default: 42)",
     )
+
     parser.add_argument(
-        "--device",
-        type=str,
-        default="cuda",
-        choices=["cuda", "cpu"],
-        help="Device to use (default: cuda)",
+        "--gradient_accumulation_steps",
+        type=int,
+        default=1,
+        help="Number of gradient accumulation steps (default: 1)",
     )
     parser.add_argument(
-        "--load_on_the_fly",
+        "--dataloader_num_workers",
+        type=int,
+        default=4,
+        help="Number of dataloader workers for parallel data loading (default: 4)",
+    )
+    parser.add_argument(
+        "--use_fp16",
         action="store_true",
-        help="Load tokens on-the-fly instead of caching in memory (default: False)",
+        help="Use mixed precision (FP16) training for speedup (default: False)",
+    )
+    parser.add_argument(
+        "--use_bf16",
+        action="store_true",
+        help="Use mixed precision (BF16) training for speedup (default: False)",
+    )
+    parser.add_argument(
+        "--max_grad_norm",
+        type=float,
+        default=5.0,
+        help="Maximum gradient norm for clipping (default: 5.0)",
+    )
+    parser.add_argument(
+        "--group_by_length",
+        action="store_true",
+        help="Group sequences by similar lengths to reduce padding waste (default: False)",
     )
     
     args = parser.parse_args()
@@ -290,19 +315,18 @@ def main():
     # Set global seed
     set_seed(args.seed)
     
-    print("=" * 60)
-    print("LSTM Training")
-    print("=" * 60)
-    print(f"Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"Manifest: {args.manifest}")
-    print(f"Tokens: {args.tokens_dir}")
-    print(f"Model: e{args.embedding_dim}_h{args.hidden_size}_l{args.num_layers}_d{args.dropout}")
-    print(f"Training: b{args.batch_size}_r{args.learning_rate}_epochs{args.num_epochs}")
-    print(f"Device: {args.device}")
-    print(f"Seed: {args.seed}")
-    print(f"Load mode: {'on-the-fly' if args.load_on_the_fly else 'cached in memory'}")
-    print("=" * 60)
-    print()
+    script_start_time = time.time()
+    
+    if is_main_process():
+        print("=" * 60)
+        print(f"Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"Manifest: {args.manifest}")
+        print(f"Tokens: {args.tokens_dir}")
+        print(f"Gradient accumulation: {args.gradient_accumulation_steps} steps")
+        print(f"DataLoader workers: {args.dataloader_num_workers}")
+        print(f"Seed: {args.seed}")
+        print("=" * 60)
+        print()
     
     # Create checkpoint directory
     checkpoint_name = create_checkpoint_name(
@@ -314,23 +338,30 @@ def main():
         learning_rate=args.learning_rate,
     )
     
+    # Extract dataset name from manifest path (e.g., "librivox_29-10-25.csv" -> "librivox")
+    manifest_path = Path(args.manifest)
+    dataset_name = manifest_path.stem.split('_')[0]  # Split on '_' and take first part
+    
     checkpoints_root = Path("checkpoints")
     checkpoints_root.mkdir(exist_ok=True)
     
-    output_dir = checkpoints_root / checkpoint_name
-    output_dir.mkdir(exist_ok=True)
+    # Structure: checkpoints/model_name/dataset_name/DD-MM-YY/
+    timestamp = datetime.now().strftime("%d-%m-%y")
+    output_dir = checkpoints_root / checkpoint_name / dataset_name / timestamp
+    output_dir.mkdir(parents=True, exist_ok=True)
     
-    print(f"Checkpoints: {output_dir}\n")
+    if is_main_process():
+        print(f"Checkpoints: {output_dir}\n")
     
     # Create datasets
-    print("Loading datasets...")
+    if is_main_process():
+        print("Loading datasets...")
     train_dataset = TokenDataset(
         manifest_path=args.manifest,
         tokens_dir=args.tokens_dir,
         split="train",
         train_ratio=args.train_ratio,
         seed=args.seed,
-        load_on_the_fly=args.load_on_the_fly,
     )
     
     val_dataset = TokenDataset(
@@ -339,36 +370,29 @@ def main():
         split="val",
         train_ratio=args.train_ratio,
         seed=args.seed,
-        load_on_the_fly=args.load_on_the_fly,
     )
-    print()
-    
-    # Collect all missing files
-    all_missing_files = train_dataset.missing_files + val_dataset.missing_files
-    if all_missing_files:
-        print(f"WARNING: {len(all_missing_files)} files missing from {args.tokens_dir}")
-        print("(See end of training log for full list)\n")
 
     # Create model config
     config = LSTMConfig(
-        vocab_size=2001,  # 2000 audio tokens + SOS
+        vocab_size=VOCAB_SIZE,
         embedding_dim=args.embedding_dim,
         hidden_size=args.hidden_size,
         num_layers=args.num_layers,
         dropout=args.dropout,
-        sos_token_id=2000,
+        sos_token_id=SOS_TOKEN_ID,
     )
     
     # Initialize model
-    print("Initializing model...")
+    if is_main_process():
+        print("Initializing model...")
     model = LSTM(config)
     
     # Count parameters
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Total parameters: {total_params:,}")
-    print(f"Trainable parameters: {trainable_params:,}")
-    print()
+    if is_main_process():
+        print(f"Total parameters: {total_params:,}")
+        print(f"Trainable parameters: {trainable_params:,}\n")
     
     # Training arguments
     training_args = TrainingArguments(
@@ -377,6 +401,15 @@ def main():
         per_device_train_batch_size=args.batch_size,
         per_device_eval_batch_size=args.batch_size,
         learning_rate=args.learning_rate,
+        lr_scheduler_type="constant",  # No LR decay (default is "linear")
+        
+        # Gradient accumulation for larger effective batch size
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        max_grad_norm=args.max_grad_norm,
+        
+        # Mixed precision training (2-3x speedup on modern GPUs)
+        fp16=args.use_fp16,
+        bf16=args.use_bf16,
         
         # Evaluate, save, and log every epoch
         eval_strategy="epoch",
@@ -388,20 +421,29 @@ def main():
         metric_for_best_model="eval_loss",
         greater_is_better=False,
         
-        # Keep only best checkpoint
-        save_total_limit=1,
+        # Keep best 3 checkpoints
+        save_total_limit=3,
         
         # Logging
         report_to="none",  # Disable wandb/tensorboard
-        logging_first_step=True,
+        disable_tqdm=True,  # Disable progress bars (we handle logging in callback)
+        
+        # DDP optimization
+        ddp_find_unused_parameters=False,  # Our LSTM uses all parameters
+        
+        # DataLoader optimization
+        dataloader_num_workers=args.dataloader_num_workers,
+        dataloader_pin_memory=True,  # Faster CPU-GPU transfer
+        group_by_length=args.group_by_length,  # Group sequences by length to reduce padding
         
         # Misc
         seed=args.seed,
-        dataloader_num_workers=0,  # Nested tensors may not work with multiprocessing
         remove_unused_columns=False,  # Keep our custom columns
     )
     
     # Create trainer
+    if is_main_process():
+        print("Creating trainer...")
     trainer = Trainer(
         model=model,
         args=training_args,
@@ -410,45 +452,57 @@ def main():
         data_collator=collate_fn,
         callbacks=[
             EarlyStoppingCallback(early_stopping_patience=args.early_stopping),
-            PerplexityCallback(),
+            FormattedLoggingCallback(),
         ],
     )
     
+    # Remove default logging callbacks that print dicts
+    # Trainer adds PrinterCallback or ProgressCallback by default
+    trainer.remove_callback(transformers.trainer_callback.PrinterCallback)
+    trainer.remove_callback(transformers.trainer_callback.ProgressCallback)
+    
+    # Print precision info
+    if is_main_process():
+        print(f"Training precision: ", end="")
+        if training_args.fp16:
+            print("FP16 (half precision)")
+        elif training_args.bf16:
+            print("BF16 (bfloat16)")
+        else:
+            print("FP32 (full precision)")
+        print()
+    
     # Train
-    print("Starting training...\n")
+    if is_main_process():
+        print("Starting training...")
     train_result = trainer.train()
     
     # Save final model
-    print("\nSaving final model...")
+    if is_main_process():
+        print("\nSaving final model...")
     trainer.save_model(str(output_dir / "final_model"))
     
-    # Print results
-    print("\n" + "=" * 60)
-    print("Training Complete")
-    print("=" * 60)
-    print(f"Final train loss: {train_result.training_loss:.4f}")
-    print(f"Final train perplexity: {np.exp(train_result.training_loss):.2f}")
+    # Calculate total script time
+    total_duration = time.time() - script_start_time
     
-    # Get best validation loss
-    eval_result = trainer.evaluate()
-    print(f"Final eval loss: {eval_result['eval_loss']:.4f}")
-    print(f"Final eval perplexity: {np.exp(eval_result['eval_loss']):.2f}")
-    
-    # Find best epoch from logs
-    if hasattr(trainer.state, 'best_metric') and trainer.state.best_metric is not None:
-        print(f"Best eval loss: {trainer.state.best_metric:.4f}")
-        print(f"Best eval perplexity: {np.exp(trainer.state.best_metric):.2f}")
-    
-    print(f"Completed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("=" * 60)
-    
-    # Print missing files at the end
-    if all_missing_files:
+    # Print results (only on main process)
+    if is_main_process():
         print("\n" + "=" * 60)
-        print(f"MISSING FILES ({len(all_missing_files)} total)")
+        print("Training Complete")
         print("=" * 60)
-        for file_id in all_missing_files:
-            print(f"  {file_id}")
+        
+        # Get final evaluation metrics
+        eval_result = trainer.evaluate()
+        print(f"Final eval loss: {eval_result['eval_loss']:.4f}")
+        print(f"Final eval perplexity: {np.exp(eval_result['eval_loss']):.2f}")
+        
+        # Best model metrics (from early stopping)
+        if hasattr(trainer.state, 'best_metric') and trainer.state.best_metric is not None:
+            print(f"Best eval loss: {trainer.state.best_metric:.4f}")
+            print(f"Best eval perplexity: {np.exp(trainer.state.best_metric):.2f}")
+        
+        print(f"\nCompleted: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"Total runtime: {total_duration / 60:.1f} min")
         print("=" * 60)
 
 
