@@ -40,7 +40,20 @@ def tokenize_manifest(
     overwrite: bool = False,
     device: str = "cuda",
 ):
-    """Tokenize audio files and save individual .pt files."""
+    """
+    Tokenize audio files and save individual .pt files.
+    
+    Args:
+        manifest_path: Path to CSV manifest with audio_filepath and file_id columns
+        dense_model: Dense model name (e.g., "mhubert-base-vp_mls_cv_8lang")
+        quantizer: Quantizer name (e.g., "kmeans-expresso")
+        vocab_size: Vocabulary size (e.g., 2000)
+        task_id: Task ID for parallel processing (default: 0)
+        num_tasks: Total number of parallel tasks (default: 1)
+        deduplicate: Remove consecutive duplicate tokens (default: True)
+        overwrite: Overwrite existing token files (default: False)
+        device: Device to use ('cuda' or 'cpu', default: 'cuda')
+    """
     
     print(f"========================================")
     print(f"Tokenization Task {task_id}/{num_tasks}")

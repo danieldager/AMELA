@@ -17,7 +17,17 @@ from utils import should_skip_existing
 
 
 def synthesize_tokens(tokens, vocoder, device="cuda"):
-    """Synthesize audio from tokens using HiFi-GAN."""
+    """
+    Synthesize audio from tokens using HiFi-GAN.
+    
+    Args:
+        tokens: Token tensor (1D or 2D)
+        vocoder: HiFi-GAN vocoder instance
+        device: Device to use (default: "cuda")
+    
+    Returns:
+        Waveform tensor
+    """
     # Ensure 1D
     if tokens.ndim > 1:
         tokens = tokens.squeeze()

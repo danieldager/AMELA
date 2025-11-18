@@ -149,7 +149,15 @@ from utils import load_manifest  # type: ignore
 def process_manifest(
     manifest_path: str, dataset_name: str, task_id: int = 0, num_tasks: int = 1
 ):
-    """Process all audio files from manifest."""
+    """
+    Process all audio files from manifest.
+    
+    Args:
+        manifest_path: Path to input manifest (CSV or JSONL)
+        dataset_name: Name of dataset (used for output directory)
+        task_id: Task ID for parallel processing (default: 0)
+        num_tasks: Total number of parallel tasks (default: 1)
+    """
 
     # Load manifest
     now = datetime.now().strftime("%H:%M:%S")
