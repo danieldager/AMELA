@@ -19,12 +19,12 @@ conda activate textless
 INPUT_DIR="${1:?Error: input_dir required}"
 OVERWRITE_FLAG="${2:-}"
 
-echo "=================================================="
+echo "=========================================="
 echo "Audio Synthesis: $INPUT_DIR"
-echo "=================================================="
+echo "=========================================="
 echo "Job: $SLURM_JOB_ID | Node: $SLURMD_NODENAME"
 echo "Started: $(date +%H:%M:%S)"
-echo "=================================================="
+echo "=========================================="
 echo
 
 python -u scripts/synthesize.py \
@@ -32,6 +32,6 @@ python -u scripts/synthesize.py \
     ${OVERWRITE_FLAG:+--overwrite}
 
 echo
-echo "=================================================="
+echo "=========================================="
 echo "Completed: $(date +%H:%M:%S)"
-echo "=================================================="
+echo "=========================================="
