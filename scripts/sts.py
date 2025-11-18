@@ -24,8 +24,6 @@ For detailed documentation, see: scripts/README.md
 """
 
 import argparse
-import json
-import csv
 import warnings
 from pathlib import Path
 from datetime import datetime
@@ -142,28 +140,10 @@ def _patched_load_checkpoint(path, *args, **kwargs):
 
 fairseq.checkpoint_utils.load_checkpoint_to_cpu = _patched_load_checkpoint
 
-
-def load_manifest(manifest_path):
-    """Load manifest from CSV or JSONL file."""
-    manifest_path = Path(manifest_path)
-
-    if manifest_path.suffix == ".jsonl" or manifest_path.suffix == ".json":
-        # JSONL format
-        with open(manifest_path, "r") as f:
-            entries = [json.loads(line) for line in f]
-    elif manifest_path.suffix == ".csv":
-        # CSV format
-        entries = []
-        with open(manifest_path, "r") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                entries.append(row)
-    else:
-        raise ValueError(
-            f"Unsupported manifest format: {manifest_path.suffix}. Use .csv or .jsonl"
-        )
-
-    return entries
+# Import shared utilities
+import sys
+sys.path.insert(0, str(Path(__file__).parent))
+from utils import load_manifest  # type: ignore
 
 
 def process_manifest(
@@ -207,7 +187,7 @@ def process_manifest(
     for entry in entries:
         input_path = entry["audio_filepath"]
 
-        # Use just the filename (original path is in the CSV)
+        # Use just the filename
         filename = Path(input_path).name
         
         # Output path: flat structure under dataset name
@@ -239,10 +219,7 @@ def process_manifest(
             encoded = encoder(waveform.cuda())
             units = encoded["units"]
             
-            # Debug: show units format for vocoder compatibility
-            print(f"  Units shape: {units.shape}, dtype: {units.dtype}")
-            print(f"  Units sample: {units[:10]}")
-            
+            # Synthesize: Discrete Units → Audio
             audio = vocoder(units)
 
             # Save
@@ -256,7 +233,6 @@ def process_manifest(
         except Exception as e:
             print(f"ERROR processing {input_path}: {e}")
             import traceback
-
             traceback.print_exc()
             continue
 

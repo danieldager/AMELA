@@ -19,6 +19,7 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 import torch
+import transformers.trainer_callback
 from torch.utils.data import Dataset
 from torch.nn.utils.rnn import pad_sequence
 from transformers import (
@@ -27,7 +28,6 @@ from transformers import (
     EarlyStoppingCallback,
     TrainerCallback,
 )
-import transformers.trainer_callback
 
 from models import LSTM, LSTMConfig
 

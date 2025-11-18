@@ -128,27 +128,23 @@ def process_single_wav(args):
         }
 
     try:
-        # Read audio file
+        # Read audio file and convert to mono if needed
         data, sr = sf.read(str(wav_path), dtype='float32')
-
-        # Convert to mono if stereo
         if len(data.shape) > 1:
             data = data.mean(axis=1)
 
         # Resample to 16kHz if needed (TenVAD expects 16kHz)
         TARGET_SR = 16000
         if sr != TARGET_SR:
-            # Convert to torch tensor for resampling
-            data_tensor = torch.from_numpy(data).unsqueeze(0)  # Add channel dim
+            data_tensor = torch.from_numpy(data).unsqueeze(0)
             data_tensor = torchaudio.functional.resample(
                 data_tensor, orig_freq=sr, new_freq=TARGET_SR
             )
-            data = data_tensor.squeeze(0).numpy()  # Remove channel dim, back to numpy
+            data = data_tensor.squeeze(0).numpy()
             sr = TARGET_SR
 
         # Convert to int16 for TenVAD
         data = (data * 32767).astype(np.int16)
-
         duration = len(data) / sr
 
         # Process frames

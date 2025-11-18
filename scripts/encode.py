@@ -9,6 +9,8 @@ Usage:
 """
 
 import argparse
+import sys
+import time
 import warnings
 from pathlib import Path
 from datetime import datetime
@@ -21,11 +23,10 @@ import torchaudio
 warnings.filterwarnings("ignore")
 
 # Import compatibility fixes from sts.py
-import sys
 sys.path.insert(0, str(Path(__file__).parent))
 from sts import *  # Imports monkey patches and encoder setup
 
-from textless.data.speech_encoder import SpeechEncoder # type: ignore
+from textless.data.speech_encoder import SpeechEncoder  # type: ignore
 
 
 def tokenize_manifest(
@@ -106,9 +107,8 @@ def tokenize_manifest(
     errors = []
     
     # Timing diagnostics
-    import time
     clock = {'load': [], 'encode': [], 'write': []}
-    TIMING_WINDOW = 1000  # Only keep last samples to avoid memory leak
+    TIMING_WINDOW = 1000  # Keep last 1000 samples to avoid memory leak
     
     for idx, row_dict in enumerate(df.to_dict('records')):
         audio_path = row_dict["audio_filepath"]
@@ -129,9 +129,9 @@ def tokenize_manifest(
             # Convert to torch tensor and ensure correct shape
             waveform = torch.from_numpy(waveform)
             if waveform.ndim == 1:
-                waveform = waveform.unsqueeze(0)  # (samples,) -> (1, samples)
+                waveform = waveform.unsqueeze(0)
             else:
-                waveform = waveform.T  # (samples, channels) -> (channels, samples)
+                waveform = waveform.T
             
             # Ensure mono audio (take first channel if multi-channel)
             if waveform.shape[0] > 1:
@@ -139,12 +139,12 @@ def tokenize_manifest(
             
             t_load = time.time() - t_start
             
-            # Resample to 16kHz if needed (skip if already 16kHz)
+            # Resample to 16kHz if needed
             if sr != ENCODER_SAMPLE_RATE:
                 waveform = torchaudio.functional.resample(
                     waveform, orig_freq=sr, new_freq=ENCODER_SAMPLE_RATE
                 )
-                t_load = time.time() - t_start  # Update time after resampling
+                t_load = time.time() - t_start
             
             # Encode: Audio → Discrete Units
             if device == "cuda":
@@ -152,7 +152,7 @@ def tokenize_manifest(
             
             with torch.no_grad():
                 encoded = encoder(waveform)
-                tokens = encoded["units"].cpu()  # Keep as tensor
+                tokens = encoded["units"].cpu()
             
             t_encode = time.time() - t_start - t_load
             
@@ -176,17 +176,16 @@ def tokenize_manifest(
             
             x = 100
             if processed % x == 0:
-                # Print timing diagnostics every 100 successfully processed files
+                # Print timing diagnostics every 100 files
                 l = f"{sum(clock['load'][-x:]) / min(x, len(clock['load'])) * 1000:.1f}"
                 e = f"{sum(clock['encode'][-x:]) / min(x, len(clock['encode'])) * 1000:.1f}"
                 w = f"{sum(clock['write'][-x:]) / min(x, len(clock['write'])) * 1000:.1f}"
                 print(f"{idx + 1}/{len(df)} | Avg (ms): load={l}, encode={e}, write={w}")
 
         except Exception as e:
-            # Skip F0 subsampling errors (non-critical, encoder still produces units)
+            # Skip F0 subsampling errors (non-critical)
             error_str = str(e)
             if "Cannot subsample F0" not in error_str:
-                # Store other errors but limit error list size to prevent memory issues
                 if len(errors) < 1000:  # Cap at 1000 errors
                     errors.append({
                         "file_id": file_id,
@@ -195,10 +194,9 @@ def tokenize_manifest(
                     })
                 print(f"ERROR [{file_id}]: {audio_path}")
                 print(f"  {error_str}\n")
-            # Don't use 'continue' - let finally block clean up memory
         
         finally:
-            # Clear GPU memory to prevent accumulation (especially important for F0 errors)
+            # Clear GPU memory periodically
             if torch.cuda.is_available() and processed % 100 == 0:
                 torch.cuda.empty_cache()
     
