@@ -43,32 +43,18 @@ echo "=========================================="
 source ~/.bashrc
 conda activate canary
 
-# Auto-detect batch size based on GPU memory
-BATCH_SIZE=8
-if command -v nvidia-smi &> /dev/null; then
-    GPU_MEM=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -n 1)
-    if [ "$GPU_MEM" -gt 70000 ]; then
-        BATCH_SIZE=16
-    elif [ "$GPU_MEM" -gt 35000 ]; then
-        BATCH_SIZE=12
-    else
-        BATCH_SIZE=8
-    fi
-    echo "GPU memory: ${GPU_MEM}MB, using batch_size=$BATCH_SIZE"
-fi
-
 # Run ASR script
 python -u scripts/asr.py \
     --manifest "$MANIFEST_PATH" \
     --task-id "$TASK_ID" \
     --num-tasks "$NUM_TASKS" \
-    --batch-size "$BATCH_SIZE" \
-    --max-tokens 512 \
+    --batch-size 32 \
+    --max-tokens 1000 \
     --device cuda
 
 echo "=========================================="
 echo "Task $TASK_ID completed: $(date)"
 echo ""
 echo "After ALL tasks finish, run merge:"
-echo "  python scripts/asr_merge.py --manifest $MANIFEST_PATH"
+echo "  python -c \"from utils import merge_asr_task_outputs; merge_asr_task_outputs('$MANIFEST_PATH')\""
 echo "=========================================="

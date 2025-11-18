@@ -18,6 +18,7 @@ from pathlib import Path
 import torch
 
 from models import load_model_from_name
+from utils import timestamp_now
 
 
 def parse_list_arg(arg_str, arg_type=float):
@@ -73,9 +74,6 @@ def main():
     top_k_values = parse_list_arg(args.top_k, int)
     top_p_values = parse_list_arg(args.top_p, float)
     
-    print("=" * 60)
-    print("LSTM Generation")
-    print("=" * 60)
     print(f"Model: {args.model} | Dataset: {args.dataset}")
     print(f"Samples: {args.num_samples} per combo | Max length: {args.max_length}")
     print(f"Temps: {temperatures} | Top-k: {top_k_values} | Top-p: {top_p_values}")
@@ -86,8 +84,8 @@ def main():
     model = load_model_from_name(args.model, args.dataset, args.checkpoint, args.device)
     print(f"Model loaded\n")
     
-    # Create output directory
-    output_dir = Path("output") / args.model / args.dataset
+    # Create output directory with tokens subdirectory
+    output_dir = Path("output") / args.model / args.dataset / "tokens"
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"Output: {output_dir}\n")
     
@@ -176,7 +174,7 @@ def main():
                         "actual_length": len(tokens),
                         "has_internal_sos": has_internal_sos,
                         "token_file": filename,
-                        "timestamp": datetime.now().isoformat(),
+                        "timestamp": timestamp_now("iso"),
                     })
                     
                     if (sample_idx + 1) % 5 == 0 or (sample_idx + 1) == args.num_samples:
@@ -188,7 +186,7 @@ def main():
     
     print("-" * 60)
     print(f"\nGenerated {sample_count} samples → {output_dir}")
-    print(f"Completed: {datetime.now().strftime('%H:%M:%S')}")
+    print(f"Completed: {timestamp_now('time')}")
     print("=" * 60)
 
 

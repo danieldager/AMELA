@@ -14,6 +14,7 @@ import torch
 import torchaudio  # type: ignore
 
 from textless.vocoders.hifigan.vocoder import CodeHiFiGANVocoder  # type: ignore
+from utils import should_skip_existing
 
 
 def synthesize_tokens(tokens, vocoder, device="cuda"):
@@ -57,18 +58,20 @@ def main():
 
     args = parser.parse_args()
 
-    print("=" * 60)
-    print("Audio Synthesis from Tokens")
-    print("=" * 60)
-    print(f"Input: {args.input_dir} | Overwrite: {args.overwrite}")
-    print("=" * 60)
-    print()
-
     input_dir = Path(args.input_dir)
     if not input_dir.exists():
         raise FileNotFoundError(f"Input directory not found: {input_dir}")
 
-    pt_files = sorted(input_dir.rglob("*.pt"))
+    # Expect tokens in tokens/ subdirectory
+    tokens_dir = input_dir if input_dir.name == "tokens" else input_dir / "tokens"
+    if not tokens_dir.exists():
+        raise FileNotFoundError(f"Tokens directory not found: {tokens_dir}")
+    
+    # Create speech/ subdirectory as sibling to tokens/
+    speech_dir = tokens_dir.parent / "speech"
+    speech_dir.mkdir(parents=True, exist_ok=True)
+
+    pt_files = sorted(tokens_dir.rglob("*.pt"))
     if len(pt_files) == 0:
         print("No .pt files found. Exiting.")
         return
@@ -76,10 +79,15 @@ def main():
     # Filter files based on overwrite flag
     files_to_process = []
     for pt_file in pt_files:
-        if pt_file.with_suffix(".wav").exists() and not args.overwrite:
-            continue
-        files_to_process.append(pt_file)
+        # Compute relative path and corresponding wav file in speech/ dir
+        rel_path = pt_file.relative_to(tokens_dir)
+        wav_file = speech_dir / rel_path.with_suffix(".wav")
+        
+        if not should_skip_existing(wav_file, args.overwrite):
+            files_to_process.append((pt_file, wav_file))
 
+    print(f"Tokens: {tokens_dir}")
+    print(f"Speech: {speech_dir}")
     print(f"Found: {len(pt_files)} .pt files | Processing: {len(files_to_process)}\n")
 
     if len(files_to_process) == 0:
@@ -101,7 +109,7 @@ def main():
     success_count = 0
     error_count = 0
 
-    for i, pt_file in enumerate(files_to_process, 1):
+    for i, (pt_file, wav_file) in enumerate(files_to_process, 1):
         try:
             tokens = torch.load(pt_file)
 
@@ -116,9 +124,10 @@ def main():
             if waveform.ndim == 1:
                 waveform = waveform.unsqueeze(0)  # Add channel dimension
 
-            torchaudio.save(
-                pt_file.with_suffix(".wav"), waveform.cpu(), sample_rate=16000
-            )
+            # Create parent directory if needed (for nested structures)
+            wav_file.parent.mkdir(parents=True, exist_ok=True)
+            
+            torchaudio.save(wav_file, waveform.cpu(), sample_rate=16000)
 
             success_count += 1
 
@@ -134,8 +143,6 @@ def main():
         f"\nSynthesized {success_count} files"
         + (f" ({error_count} errors)" if error_count > 0 else "")
     )
-    print(f"Completed: {datetime.now().strftime('%H:%M:%S')}")
-    print("=" * 60)
 
 
 if __name__ == "__main__":

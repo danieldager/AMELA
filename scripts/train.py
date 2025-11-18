@@ -335,6 +335,12 @@ def main():
         action="store_true",
         help="Group sequences by similar lengths to reduce padding waste (default: False)",
     )
+    parser.add_argument(
+        "--resume_from_checkpoint",
+        type=str,
+        default=None,
+        help="Path to checkpoint directory to resume from (default: None)",
+    )
 
     args = parser.parse_args()
 
@@ -491,7 +497,7 @@ def main():
     # Train
     if is_main_process():
         print("Starting training...")
-    train_result = trainer.train()
+    train_result = trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
 
     # Save final model
     if is_main_process():

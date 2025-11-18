@@ -22,19 +22,17 @@ DATASET="${2:?Error: dataset_name required}"
 CHECKPOINT="${3:-}"
 
 # Generation parameters
-TEMPERATURES="0.8,1.0,1.2"
+TEMPERATURES="0.7,1.0,1.3"
 TOP_K="50,100,None"
 TOP_P="0.9,0.95,None"
-NUM_SAMPLES=5
-MAX_LENGTH=500
+NUM_SAMPLES=3
+MAX_LENGTH=1000
 
 echo "=================================================="
 echo "LSTM Generation: $MODEL $DATASET"
 echo "=================================================="
 echo "Job: $SLURM_JOB_ID | Node: $SLURMD_NODENAME"
 echo "Started: $(date +%H:%M:%S)"
-echo "=================================================="
-echo
 
 python -u scripts/generate.py \
     --model "$MODEL" \

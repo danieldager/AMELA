@@ -13,13 +13,15 @@
 
 # Validate inputs
 if [ -z "$1" ] || [ -z "$2" ]; then
-    echo "Usage: sbatch scripts/train.slurm <manifest_path> <tokens_dir>"
+    echo "Usage: sbatch scripts/train.slurm <manifest_path> <tokens_dir> [--resume]"
     echo "Example: sbatch scripts/train.slurm metadata/librivox_29-10-25.csv output/librivox_mhubert_expresso_2000"
+    echo "Resume:  sbatch scripts/train.slurm metadata/librivox_29-10-25.csv output/librivox_mhubert_expresso_2000 --resume"
     exit 1
 fi
 
 MANIFEST_PATH="$1"
 TOKENS_DIR="$2"
+RESUME_FLAG="${3:-}"  # Optional --resume flag
 
 if [ ! -f "$MANIFEST_PATH" ]; then
     echo "ERROR: Manifest not found: $MANIFEST_PATH"
@@ -86,6 +88,29 @@ export PYTHONUNBUFFERED=1
 
 echo "Launching training..."
 
+# Build resume argument if --resume flag provided
+RESUME_ARG=""
+if [ "$RESUME_FLAG" = "--resume" ]; then
+    # Build expected checkpoint directory based on hyperparameters
+    MODEL_NAME="lstm_h${HIDDEN_SIZE}_r${LEARNING_RATE}_e${EMBEDDING_DIM}_l${NUM_LAYERS}_b${BATCH_SIZE}_d${DROPOUT}"
+    CHECKPOINT_DIR="checkpoints/${MODEL_NAME}"
+    
+    # Find the most recent checkpoint
+    if [ -d "$CHECKPOINT_DIR" ]; then
+        LATEST_CHECKPOINT=$(find "$CHECKPOINT_DIR" -type d -name "checkpoint-*" | sort -V | tail -n1)
+        if [ -n "$LATEST_CHECKPOINT" ]; then
+            RESUME_ARG="--resume_from_checkpoint $LATEST_CHECKPOINT"
+            echo "Resuming from: $LATEST_CHECKPOINT"
+        else
+            echo "WARNING: --resume specified but no checkpoints found in $CHECKPOINT_DIR"
+            echo "Starting training from scratch..."
+        fi
+    else
+        echo "WARNING: --resume specified but checkpoint directory not found: $CHECKPOINT_DIR"
+        echo "Starting training from scratch..."
+    fi
+fi
+
 torchrun \
     --standalone \
     --nnodes=1 \
@@ -106,6 +131,7 @@ torchrun \
     --dataloader_num_workers 4 \
     --group_by_length \
     --seed 42 \
+    $RESUME_ARG \
     $PRECISION_FLAG
 
 echo "Completed: $(date) (exit code: $?)"
