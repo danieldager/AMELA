@@ -29,7 +29,7 @@ NUM_SAMPLES=5
 MAX_LENGTH=500
 
 echo "=================================================="
-echo "LSTM Generation: $MODEL | $DATASET"
+echo "LSTM Generation: $MODEL $DATASET"
 echo "=================================================="
 echo "Job: $SLURM_JOB_ID | Node: $SLURMD_NODENAME"
 echo "Started: $(date +%H:%M:%S)"

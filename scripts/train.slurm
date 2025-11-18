@@ -1,11 +1,10 @@
 #!/bin/bash
 #SBATCH --job-name=lstm_train
-#SBATCH --output=logs/train_%A_%a.out
-#SBATCH --error=logs/train_%A_%a.err
-#SBATCH --array=0-0
+#SBATCH --output=logs/train_%j.out
+#SBATCH --error=logs/train_%j.err
 #SBATCH --nodes=1
-#SBATCH --gres=gpu:3
-#SBATCH --ntasks-per-node=3
+#SBATCH --gres=gpu:6
+#SBATCH --ntasks-per-node=6
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=24:00:00
@@ -34,95 +33,47 @@ fi
 
 mkdir -p logs
 
-TASK_ID=${SLURM_ARRAY_TASK_ID:-0}
-
-# Detect number of GPUs
-NUM_GPUS=$(nvidia-smi --list-gpus | wc -l)
-
 # Activate conda environment
 source ~/.bashrc
 conda activate amela_train
 
 # ========================================
-# GRID SEARCH CONFIGURATION
+# HYPERPARAMETERS
 # ========================================
-EMBEDDING_DIMS=(1024)
-HIDDEN_SIZES=(2048)
-NUM_LAYERS=(3)
-DROPOUTS=(0.1)
-BATCH_SIZES=(64)
-LEARNING_RATES=(0.0003)
+EMBEDDING_DIM=2048
+HIDDEN_SIZE=4096
+NUM_LAYERS=3
+DROPOUT=0.2
+BATCH_SIZE=32
+LEARNING_RATE=0.0003
+NUM_EPOCHS=100
+TRAIN_RATIO=0.95
+EARLY_STOPPING=5
+GRAD_ACCUM_STEPS=4
 # ========================================
 
-# Calculate total combinations
-TOTAL_COMBINATIONS=$((
-    ${#EMBEDDING_DIMS[@]} * \
-    ${#HIDDEN_SIZES[@]} * \
-    ${#NUM_LAYERS[@]} * \
-    ${#DROPOUTS[@]} * \
-    ${#BATCH_SIZES[@]} * \
-    ${#LEARNING_RATES[@]}
-))
-
-# Validate array size matches total combinations
-EXPECTED_ARRAY_MAX=$((TOTAL_COMBINATIONS - 1))
-if [ -n "$SLURM_ARRAY_TASK_COUNT" ]; then
-    if [ "$SLURM_ARRAY_TASK_COUNT" -ne "$TOTAL_COMBINATIONS" ]; then
-        echo "ERROR: Array size mismatch!"
-        echo "  Expected: --array=0-$EXPECTED_ARRAY_MAX (total: $TOTAL_COMBINATIONS)"
-        echo "  Got:      Array count of $SLURM_ARRAY_TASK_COUNT"
-        echo "  Please update the #SBATCH --array directive to match the grid search configuration"
-        exit 1
-    fi
-fi
-
-if [ $TASK_ID -ge $TOTAL_COMBINATIONS ]; then
-    echo "ERROR: TASK_ID=$TASK_ID exceeds total combinations=$TOTAL_COMBINATIONS"
-    exit 1
-fi
-
-# Map task ID to hyperparameter combination
-# Use modulo arithmetic to iterate through all combinations
-idx=$TASK_ID
-
-lr_idx=$((idx % ${#LEARNING_RATES[@]}))
-idx=$((idx / ${#LEARNING_RATES[@]}))
-
-bs_idx=$((idx % ${#BATCH_SIZES[@]}))
-idx=$((idx / ${#BATCH_SIZES[@]}))
-
-dropout_idx=$((idx % ${#DROPOUTS[@]}))
-idx=$((idx / ${#DROPOUTS[@]}))
-
-layers_idx=$((idx % ${#NUM_LAYERS[@]}))
-idx=$((idx / ${#NUM_LAYERS[@]}))
-
-hidden_idx=$((idx % ${#HIDDEN_SIZES[@]}))
-idx=$((idx / ${#HIDDEN_SIZES[@]}))
-
-embed_idx=$idx
-
-# Extract hyperparameters
-EMBEDDING_DIM=${EMBEDDING_DIMS[$embed_idx]}
-HIDDEN_SIZE=${HIDDEN_SIZES[$hidden_idx]}
-NUM_LAYERS=${NUM_LAYERS[$layers_idx]}
-DROPOUT=${DROPOUTS[$dropout_idx]}
-BATCH_SIZE=${BATCH_SIZES[$bs_idx]}
-LEARNING_RATE=${LEARNING_RATES[$lr_idx]}
-
-echo "=========================================="
-echo "LSTM Training (DDP)"
-echo "=========================================="
-echo "Job: $SLURM_JOB_ID | Task: $((TASK_ID + 1))/$TOTAL_COMBINATIONS"
-echo "Model: lstm_h${HIDDEN_SIZE}_r${LEARNING_RATE}_e${EMBEDDING_DIM}l${NUM_LAYERS}_b${BATCH_SIZE}_d${DROPOUT}"
-echo "Data: $(basename $MANIFEST_PATH)"
-echo "Node: $SLURMD_NODENAME | GPUs: $NUM_GPUS"
-echo "=========================================="
-
-# Auto-detect precision based on GPU
+# Auto-detect number of GPUs and precision
+NUM_GPUS=$(echo $CUDA_VISIBLE_DEVICES | tr ',' '\n' | wc -l)
 GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader,nounits | head -n1)
+
+# Model name for checkpoints/outputs
+MODEL_NAME="lstm_r${LEARNING_RATE}_h${HIDDEN_SIZE}_e${EMBEDDING_DIM}_l${NUM_LAYERS}_b${BATCH_SIZE}_d${DROPOUT}"
+
+echo "=========================================="
+echo "LSTM Training - Job $SLURM_JOB_ID"
+echo "=========================================="
+echo "Model: $MODEL_NAME"
+echo ""
+echo "Training: epochs=${NUM_EPOCHS}, early_stopping=${EARLY_STOPPING}"
+echo "Batching: ${BATCH_SIZE}/gpu × ${GRAD_ACCUM_STEPS} accum × ${NUM_GPUS} gpus = $((BATCH_SIZE * GRAD_ACCUM_STEPS * NUM_GPUS)) effective"
+echo "Hardware: ${NUM_GPUS}× $GPU_NAME @ $SLURMD_NODENAME"
+echo "Data: $(basename $MANIFEST_PATH) (train_ratio=${TRAIN_RATIO})"
+echo "=========================================="
+
+# Use BF16 for A100/H100, FP16 for older GPUs
 if [[ "$GPU_NAME" == *"A100"* ]] || [[ "$GPU_NAME" == *"H100"* ]]; then
     PRECISION_FLAG="--use_bf16"
+    echo "Using BF16 mixed precision (A100/H100 optimized)"
 else
     PRECISION_FLAG="--use_fp16"
 fi
@@ -148,13 +99,13 @@ torchrun \
     --dropout "$DROPOUT" \
     --batch_size "$BATCH_SIZE" \
     --learning_rate "$LEARNING_RATE" \
-    --num_epochs 100 \
-    --train_ratio 0.95 \
-    --early_stopping 5 \
-    --seed 42 \
-    --gradient_accumulation_steps 4 \
+    --num_epochs "$NUM_EPOCHS" \
+    --train_ratio "$TRAIN_RATIO" \
+    --early_stopping "$EARLY_STOPPING" \
+    --gradient_accumulation_steps "$GRAD_ACCUM_STEPS" \
     --dataloader_num_workers 4 \
     --group_by_length \
+    --seed 42 \
     $PRECISION_FLAG
 
 echo "Completed: $(date) (exit code: $?)"
