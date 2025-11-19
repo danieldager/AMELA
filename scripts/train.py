@@ -28,6 +28,7 @@ from transformers import (
     EarlyStoppingCallback,
     TrainerCallback,
 )
+import wandb
 
 from models import LSTM, LSTMConfig
 
@@ -47,7 +48,7 @@ VOCAB_SIZE = NUM_AUDIO_TOKENS + 2
 def is_main_process():
     """
     Return True if this is rank 0 or not using DDP.
-    
+
     Returns:
         True if main process, False otherwise
     """
@@ -112,7 +113,7 @@ class FormattedLoggingCallback(TrainerCallback):
 def set_seed(seed: int = 42):
     """
     Set global seed for reproducibility.
-    
+
     Args:
         seed: Random seed (default: 42)
     """
@@ -209,10 +210,10 @@ class TokenDataset(Dataset):
 def collate_fn(batch):
     """
     Collate variable-length sequences with padding.
-    
+
     Args:
         batch: List of data items from dataset
-    
+
     Returns:
         Dict with padded inputs, labels, and lengths
     """
@@ -232,7 +233,7 @@ def create_checkpoint_name(
 ):
     """
     Create checkpoint directory name from hyperparameters.
-    
+
     Args:
         learning_rate: Learning rate
         hidden_size: LSTM hidden size
@@ -240,7 +241,7 @@ def create_checkpoint_name(
         num_layers: Number of LSTM layers
         batch_size: Batch size
         dropout: Dropout rate
-    
+
     Returns:
         Formatted checkpoint directory name
     """
@@ -397,6 +398,7 @@ def main():
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,
     )
+    wandb.init(project="amela-lstm", name=checkpoint_name)
 
     # Extract dataset name from manifest path (e.g., "librivox_29-10-25.csv" -> "librivox")
     manifest_path = Path(args.manifest)
@@ -480,7 +482,8 @@ def main():
         # Keep best 3 checkpoints
         save_total_limit=3,
         # Logging
-        report_to="none",  # Disable wandb/tensorboard
+        report_to="wandb",  # Log to Weights & Biases
+        run_name=checkpoint_name,  # Use hyperparameter-based name
         disable_tqdm=True,  # Disable progress bars (we handle logging in callback)
         # DDP optimization
         ddp_find_unused_parameters=False,  # Our LSTM uses all parameters
