@@ -59,9 +59,7 @@ echo
 
 source ~/.bashrc
 
-# ==========================================
-# STAGE 1: Generate Tokens
-# ==========================================
+# Stage 1: Generate Tokens
 echo "=========================================="
 echo "STAGE 1: Generating Tokens"
 echo "=========================================="
@@ -80,9 +78,7 @@ python -u scripts/generate.py \
 echo "Stage 1 complete: $(date)"
 echo
 
-# ==========================================
-# STAGE 2: Synthesize Speech
-# ==========================================
+# Stage 2: Synthesize Speech
 echo "=========================================="
 echo "STAGE 2: Synthesizing Speech"
 echo "=========================================="
@@ -94,9 +90,7 @@ python -u scripts/synthesize.py \
 echo "Stage 2 complete: $(date)"
 echo
 
-# ==========================================
-# STAGE 3: VAD Analysis
-# ==========================================
+# Stage 3: VAD Analysis
 echo "=========================================="
 echo "STAGE 3: VAD Analysis"
 echo "=========================================="
@@ -110,9 +104,7 @@ python -u scripts/vad.py \
 echo "Stage 3 complete: $(date)"
 echo
 
-# ==========================================
-# STAGE 4: ASR Transcription
-# ==========================================
+# Stage 4: ASR Transcription
 echo "=========================================="
 echo "STAGE 4: ASR Transcription"
 echo "=========================================="
@@ -135,9 +127,7 @@ rm -f "$TEMP_TRANSCRIPTIONS"
 echo "Stage 4 complete: $(date)"
 echo
 
-# ==========================================
 # Summary
-# ==========================================
 echo "=========================================="
 echo "Pipeline Complete"
 echo "=========================================="

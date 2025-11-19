@@ -18,10 +18,10 @@ After processing, adds 'text' field:
 import argparse
 import json
 import sys
+import time
 import warnings
 from pathlib import Path
 from typing import Optional
-import time
 
 warnings.filterwarnings("ignore")
 
@@ -41,7 +41,19 @@ def process_manifest(
     num_tasks: int = 1,
     output_path: Optional[str] = None,
 ):
-    """Process audio files and write transcriptions to task-specific output file."""
+    """
+    Process audio files and write transcriptions to task-specific output file.
+    
+    Args:
+        manifest_path: Path to input manifest (CSV or JSONL)
+        model_name: ASR model name
+        batch_size: Batch size for processing
+        max_tokens: Maximum tokens per transcription
+        device: Device to use ('cuda' or 'cpu')
+        task_id: Task ID for parallel processing (default: 0)
+        num_tasks: Total number of parallel tasks (default: 1)
+        output_path: Optional output path for single-task mode
+    """
 
     # Read manifest
     all_entries = load_manifest(manifest_path)

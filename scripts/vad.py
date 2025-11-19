@@ -22,7 +22,15 @@ from ten_vad import TenVad  # type: ignore
 
 
 def get_runs(flags):
-    """Return (start, end) pairs for periods of speech and non-speech."""
+    """
+    Return (start, end) pairs for periods of speech and non-speech.
+    
+    Args:
+        flags: Array of VAD flags (0=non-speech, 1=speech)
+    
+    Returns:
+        Tuple of (speech_runs, non_speech_runs) as numpy arrays
+    """
     if len(flags) == 0:
         return np.array([]), np.array([])
 
@@ -46,7 +54,17 @@ def get_runs(flags):
 
 
 def runs_to_secs(runs, hop_size, sr):
-    """Convert runs of speech and non-speech from frames to seconds."""
+    """
+    Convert runs of speech and non-speech from frames to seconds.
+    
+    Args:
+        runs: Array of (start, end) frame pairs
+        hop_size: Number of samples per frame
+        sr: Sample rate
+    
+    Returns:
+        Array of durations in seconds
+    """
     if runs is None or len(runs) == 0:
         return np.array([], dtype=np.float32)
 
@@ -65,6 +83,7 @@ def find_splits(flags, hop_size, sr, target_interval=30.0):
         flags: Array of VAD flags (0=non-speech, 1=speech)
         hop_size: Number of samples per frame
         sr: Sample rate
+        target_interval: Target interval for splits in seconds (default: 30.0)
 
     Returns:
         List of frame indices where splits should occur
@@ -115,7 +134,15 @@ def find_splits(flags, hop_size, sr, target_interval=30.0):
 
 
 def process_single_wav(args):
-    """Process a single WAV file - designed for multiprocessing."""
+    """
+    Process a single WAV file - designed for multiprocessing.
+    
+    Args:
+        args: Tuple of (wav_path, hop_size, threshold)
+    
+    Returns:
+        Dict with audio metrics or error information
+    """
     wav_path, hop_size, threshold = args
 
     try:
@@ -128,27 +155,23 @@ def process_single_wav(args):
         }
 
     try:
-        # Read audio file
+        # Read audio file and convert to mono if needed
         data, sr = sf.read(str(wav_path), dtype='float32')
-
-        # Convert to mono if stereo
         if len(data.shape) > 1:
             data = data.mean(axis=1)
 
         # Resample to 16kHz if needed (TenVAD expects 16kHz)
         TARGET_SR = 16000
         if sr != TARGET_SR:
-            # Convert to torch tensor for resampling
-            data_tensor = torch.from_numpy(data).unsqueeze(0)  # Add channel dim
+            data_tensor = torch.from_numpy(data).unsqueeze(0)
             data_tensor = torchaudio.functional.resample(
                 data_tensor, orig_freq=sr, new_freq=TARGET_SR
             )
-            data = data_tensor.squeeze(0).numpy()  # Remove channel dim, back to numpy
+            data = data_tensor.squeeze(0).numpy()
             sr = TARGET_SR
 
         # Convert to int16 for TenVAD
         data = (data * 32767).astype(np.int16)
-
         duration = len(data) / sr
 
         # Process frames
@@ -194,7 +217,18 @@ def process_single_wav(args):
 
 
 def process_wavs_parallel(wavs, hop_size, threshold, max_workers):
-    """Process WAV files in parallel across multiple workers."""
+    """
+    Process WAV files in parallel across multiple workers.
+    
+    Args:
+        wavs: List of WAV file paths
+        hop_size: Hop size for VAD processing
+        threshold: VAD threshold
+        max_workers: Number of parallel workers
+    
+    Returns:
+        List of processing results (dicts with audio metrics)
+    """
     
     args_list = [(wav, hop_size, threshold) for wav in wavs]
     

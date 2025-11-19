@@ -19,6 +19,7 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 import torch
+import transformers.trainer_callback
 from torch.utils.data import Dataset
 from torch.nn.utils.rnn import pad_sequence
 from transformers import (
@@ -27,7 +28,6 @@ from transformers import (
     EarlyStoppingCallback,
     TrainerCallback,
 )
-import transformers.trainer_callback
 
 from models import LSTM, LSTMConfig
 
@@ -45,7 +45,12 @@ VOCAB_SIZE = NUM_AUDIO_TOKENS + 2
 
 # DDP helper: Check if we're in distributed mode and get rank
 def is_main_process():
-    """Return True if this is rank 0 or not using DDP."""
+    """
+    Return True if this is rank 0 or not using DDP.
+    
+    Returns:
+        True if main process, False otherwise
+    """
     local_rank = int(os.environ.get("LOCAL_RANK", -1))
     return local_rank == -1 or local_rank == 0
 
@@ -105,7 +110,12 @@ class FormattedLoggingCallback(TrainerCallback):
 
 
 def set_seed(seed: int = 42):
-    """Set global seed for reproducibility."""
+    """
+    Set global seed for reproducibility.
+    
+    Args:
+        seed: Random seed (default: 42)
+    """
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -197,8 +207,15 @@ class TokenDataset(Dataset):
 
 
 def collate_fn(batch):
-    """Collate variable-length sequences with padding."""
-
+    """
+    Collate variable-length sequences with padding.
+    
+    Args:
+        batch: List of data items from dataset
+    
+    Returns:
+        Dict with padded inputs, labels, and lengths
+    """
     sequences = [item["input_ids"] for item in batch]
     lengths = torch.tensor([len(seq) for seq in sequences], dtype=torch.long)
     padded_batch = pad_sequence(sequences, batch_first=True, padding_value=PAD_TOKEN_ID)
@@ -213,7 +230,20 @@ def collate_fn(batch):
 def create_checkpoint_name(
     learning_rate, hidden_size, embedding_dim, num_layers, batch_size, dropout
 ):
-    """Create checkpoint directory name from hyperparameters."""
+    """
+    Create checkpoint directory name from hyperparameters.
+    
+    Args:
+        learning_rate: Learning rate
+        hidden_size: LSTM hidden size
+        embedding_dim: Embedding dimension
+        num_layers: Number of LSTM layers
+        batch_size: Batch size
+        dropout: Dropout rate
+    
+    Returns:
+        Formatted checkpoint directory name
+    """
     return f"lstm_h{hidden_size}_r{learning_rate}_e{embedding_dim}_l{num_layers}_b{batch_size}_d{dropout}"
 
 

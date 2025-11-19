@@ -12,8 +12,8 @@ from typing import Optional
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig, PreTrainedModel
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
+from transformers import PretrainedConfig, PreTrainedModel
 
 
 # Constants

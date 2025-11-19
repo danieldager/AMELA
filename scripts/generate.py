@@ -12,7 +12,6 @@ Usage:
 
 import argparse
 import csv
-from datetime import datetime
 from pathlib import Path
 
 import torch
@@ -22,7 +21,16 @@ from utils import timestamp_now
 
 
 def parse_list_arg(arg_str, arg_type=float):
-    """Parse comma-separated list, handling 'None' values."""
+    """
+    Parse comma-separated list, handling 'None' values.
+    
+    Args:
+        arg_str: Comma-separated string (e.g., "0.8,1.0,None")
+        arg_type: Type to convert values to (default: float)
+    
+    Returns:
+        List of parsed values (None for 'None' strings)
+    """
     values = []
     for val in arg_str.split(","):
         val = val.strip()
@@ -31,7 +39,16 @@ def parse_list_arg(arg_str, arg_type=float):
 
 
 def check_internal_sos(tokens, sos_token_id=2000):
-    """Check if SOS token appears after position 0."""
+    """
+    Check if SOS token appears after position 0.
+    
+    Args:
+        tokens: Token tensor
+        sos_token_id: SOS token ID (default: 2000)
+    
+    Returns:
+        True if SOS appears after first position, False otherwise
+    """
     return len(tokens) > 1 and sos_token_id in tokens[1:].tolist()
 
 
