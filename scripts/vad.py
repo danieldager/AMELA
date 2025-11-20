@@ -15,19 +15,19 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import soundfile as sf
+import soundfile as sf  # type: ignore
 import torch
-import torchaudio
+import torchaudio  # type: ignore
 from ten_vad import TenVad  # type: ignore
 
 
 def get_runs(flags):
     """
     Return (start, end) pairs for periods of speech and non-speech.
-    
+
     Args:
         flags: Array of VAD flags (0=non-speech, 1=speech)
-    
+
     Returns:
         Tuple of (speech_runs, non_speech_runs) as numpy arrays
     """
@@ -56,12 +56,12 @@ def get_runs(flags):
 def runs_to_secs(runs, hop_size, sr):
     """
     Convert runs of speech and non-speech from frames to seconds.
-    
+
     Args:
         runs: Array of (start, end) frame pairs
         hop_size: Number of samples per frame
         sr: Sample rate
-    
+
     Returns:
         Array of durations in seconds
     """
@@ -136,10 +136,10 @@ def find_splits(flags, hop_size, sr, target_interval=30.0):
 def process_single_wav(args):
     """
     Process a single WAV file - designed for multiprocessing.
-    
+
     Args:
         args: Tuple of (wav_path, hop_size, threshold)
-    
+
     Returns:
         Dict with audio metrics or error information
     """
@@ -156,7 +156,7 @@ def process_single_wav(args):
 
     try:
         # Read audio file and convert to mono if needed
-        data, sr = sf.read(str(wav_path), dtype='float32')
+        data, sr = sf.read(str(wav_path), dtype="float32")
         if len(data.shape) > 1:
             data = data.mean(axis=1)
 
@@ -177,8 +177,10 @@ def process_single_wav(args):
         # Process frames
         num_frames = len(data) // hop_size
         if num_frames == 0:
-            raise ValueError(f"Audio too short for hop_size {hop_size}: {len(data)} samples")
-        
+            raise ValueError(
+                f"Audio too short for hop_size {hop_size}: {len(data)} samples"
+            )
+
         frames = data[: num_frames * hop_size].reshape(-1, hop_size)
         flags = np.empty(num_frames, dtype=np.uint8)
 
@@ -219,24 +221,23 @@ def process_single_wav(args):
 def process_wavs_parallel(wavs, hop_size, threshold, max_workers):
     """
     Process WAV files in parallel across multiple workers.
-    
+
     Args:
         wavs: List of WAV file paths
         hop_size: Hop size for VAD processing
         threshold: VAD threshold
         max_workers: Number of parallel workers
-    
+
     Returns:
         List of processing results (dicts with audio metrics)
     """
-    
+
     args_list = [(wav, hop_size, threshold) for wav in wavs]
-    
+
     results = []
     completed = 0
     errors = 0
     total = len(wavs)
-    hundredth = max(1, total // 100)
     start_time = time.time()
 
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
@@ -249,7 +250,7 @@ def process_wavs_parallel(wavs, hop_size, threshold, max_workers):
             wav_path = future_to_wav[future]
             completed += 1
 
-            if completed % hundredth == 0 or completed == total:
+            if completed % (total // 10) == 0 or completed == total:
                 elapsed = time.time() - start_time
                 rate = completed / elapsed
                 eta = (total - completed) / rate if rate > 0 else 0
@@ -263,7 +264,10 @@ def process_wavs_parallel(wavs, hop_size, threshold, max_workers):
                 if result is not None:
                     if "error" in result:
                         errors += 1
-                        print(f"WARNING: Error processing {wav_path.name}: {result['error']}", file=sys.stderr)
+                        print(
+                            f"WARNING: Error processing {wav_path.name}: {result['error']}",
+                            file=sys.stderr,
+                        )
                     results.append(result)
             except Exception as e:
                 errors += 1
@@ -273,7 +277,9 @@ def process_wavs_parallel(wavs, hop_size, threshold, max_workers):
     print(f"Completed processing {len(results)}/{total} files in {elapsed:.1f}s")
 
     if errors > 0:
-        print(f"WARNING: Encountered {errors} errors during processing", file=sys.stderr)
+        print(
+            f"WARNING: Encountered {errors} errors during processing", file=sys.stderr
+        )
 
     return results
 
@@ -324,7 +330,7 @@ def main():
     if not wavs:
         print(f"ERROR: No WAV files found in {dataset}", file=sys.stderr)
         sys.exit(1)
-    
+
     print(f"Found {len(wavs)} WAV files in {dataset}")
 
     # Auto-detect workers
@@ -342,9 +348,9 @@ def main():
     else:
         output_base = Path(args.output)
         output_base.parent.mkdir(parents=True, exist_ok=True)
-    
-    output_csv = output_base.with_suffix('.csv')
-    output_jsonl = output_base.with_suffix('.jsonl')
+
+    output_csv = output_base.with_suffix(".csv")
+    output_jsonl = output_base.with_suffix(".jsonl")
 
     # Process files
     try:
@@ -356,25 +362,28 @@ def main():
         )
 
         if not results:
-            print("ERROR: No results generated - all files failed processing", file=sys.stderr)
+            print(
+                "ERROR: No results generated - all files failed processing",
+                file=sys.stderr,
+            )
             sys.exit(1)
 
         df = pd.DataFrame(results)
-        
+
         # Save full CSV
         df.to_csv(output_csv, index=False)
         print(f"Full results saved to {output_csv}")
 
         # Save JSONL with only audio_filepath and duration
-        with open(output_jsonl, 'w') as f:
+        with open(output_jsonl, "w") as f:
             for _, row in df.iterrows():
-                if pd.isna(row.get('error')):
+                if pd.isna(row.get("error")):
                     entry = {
                         "audio_filepath": row["audio_filepath"],
-                        "duration": row["duration"]
+                        "duration": row["duration"],
                     }
-                    f.write(json.dumps(entry) + '\n')
-        
+                    f.write(json.dumps(entry) + "\n")
+
         print(f"JSONL manifest saved to {output_jsonl}")
 
         # Report statistics
@@ -385,13 +394,17 @@ def main():
             if len(errors_df) > 0:
                 print(f"WARNING: Failed files: {len(errors_df)}", file=sys.stderr)
                 for _, row in errors_df.head(5).iterrows():
-                    print(f"  {Path(row['audio_filepath']).name}: {row['error']}", file=sys.stderr)
+                    print(
+                        f"  {Path(row['audio_filepath']).name}: {row['error']}",
+                        file=sys.stderr,
+                    )
         else:
             print(f"Successfully processed: {len(df)} files")
 
     except Exception as e:
         print(f"ERROR: Pipeline failed: {e}", file=sys.stderr)
         import traceback
+
         traceback.print_exc()
         sys.exit(1)
 

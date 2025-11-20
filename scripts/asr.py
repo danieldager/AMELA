@@ -2,14 +2,18 @@
 """
 ASR Pipeline using NVIDIA Canary-Qwen-2.5B for English transcription.
 
-Each task writes its transcriptions to a separate file.
-Merge all task outputs afterward with a simple script.
+Single-task mode (default): Updates manifest in-place with transcriptions.
+Multi-task mode (--num-tasks > 1): Writes per-task JSON files for merging later.
 
 Usage:
+    # Single task (updates manifest directly)
+    python asr.py --manifest data.csv
+
+    # Parallel tasks (writes intermediate files)
     python asr.py --manifest data.json --task-id 0 --num-tasks 16
 
-Input/Output format (JSONL):
-    {"audio_filepath": "/path/to/expresso/audio/file.wav", "duration": 21.4}
+Input format (CSV or JSONL):
+    {"audio_filepath": "/path/to/audio.wav", "duration": 21.4}
 
 After processing, adds 'text' field:
     {"audio_filepath": "...", "duration": 21.4, "text": "Transcription here."}
@@ -17,6 +21,7 @@ After processing, adds 'text' field:
 
 import argparse
 import json
+import logging
 import sys
 import time
 import warnings
@@ -25,10 +30,13 @@ from typing import Optional
 
 warnings.filterwarnings("ignore")
 
+# Suppress NeMo logging
+logging.getLogger("nemo_logger").setLevel(logging.WARNING)
+
 import torch  # type: ignore
 from nemo.collections.speechlm2.models import SALM  # type: ignore
 
-from utils import load_manifest, distribute_tasks, print_device_info
+from utils import load_manifest, save_manifest, distribute_tasks, print_device_info
 
 
 def process_manifest(
@@ -39,11 +47,13 @@ def process_manifest(
     device: str,
     task_id: int = 0,
     num_tasks: int = 1,
-    output_path: Optional[str] = None,
 ):
     """
-    Process audio files and write transcriptions to task-specific output file.
-    
+    Process audio files and add transcriptions to manifest.
+
+    Single-task mode (num_tasks=1): Updates manifest in-place.
+    Multi-task mode (num_tasks>1): Writes intermediate JSON for later merging.
+
     Args:
         manifest_path: Path to input manifest (CSV or JSONL)
         model_name: ASR model name
@@ -52,7 +62,6 @@ def process_manifest(
         device: Device to use ('cuda' or 'cpu')
         task_id: Task ID for parallel processing (default: 0)
         num_tasks: Total number of parallel tasks (default: 1)
-        output_path: Optional output path for single-task mode
     """
 
     # Read manifest
@@ -133,14 +142,21 @@ def process_manifest(
             print(f"ERROR: Batch {batch_num} failed: {e}", file=sys.stderr)
             continue
 
-    # Write output file
-    if output_path:
-        # Single task mode: write directly to output
-        print(f"Writing transcriptions to {output_path}")
-        with open(output_path, "w") as f:
-            json.dump(transcriptions, f, indent=2)
+    # Write output
+    if num_tasks == 1:
+        # Single task mode: update manifest in-place
+        print(f"Updating manifest in-place: {manifest_path}")
+        
+        # Update entries with transcriptions
+        for entry in all_entries:
+            if entry["audio_filepath"] in transcriptions:
+                entry["text"] = transcriptions[entry["audio_filepath"]]
+        
+        # Save updated manifest
+        save_manifest(all_entries, manifest_path)
+        print(f"Manifest updated with {len(transcriptions)} transcriptions")
     else:
-        # Multi-task mode: write to intermediate task file
+        # Multi-task mode: write intermediate task file for later merging
         manifest_path_obj = Path(manifest_path)
         output_dir = (
             manifest_path_obj.parent / f".{manifest_path_obj.stem}_transcriptions"
@@ -181,16 +197,16 @@ def main():
         help="Model name (default: nvidia/canary-qwen-2.5b)",
     )
     parser.add_argument(
-        "--batch-size",
+        "--batch_size",
         type=int,
-        default=32,
-        help="Batch size (default: 32, tuned for A40 48GB)",
+        default=64,
+        help="Batch size (default: 64, tuned for A40 48GB)",
     )
     parser.add_argument(
-        "--max-tokens",
+        "--max_tokens",
         type=int,
-        default=512,
-        help="Max tokens per transcription (default: 512)",
+        default=1000,
+        help="Max tokens per transcription (default: 1000)",
     )
     parser.add_argument(
         "--device",
@@ -203,12 +219,6 @@ def main():
     )
     parser.add_argument(
         "--num-tasks", type=int, default=1, help="Total number of parallel tasks"
-    )
-    parser.add_argument(
-        "--output",
-        type=str,
-        default=None,
-        help="Output path for transcriptions (single-task mode only)",
     )
 
     args = parser.parse_args()
@@ -229,7 +239,6 @@ def main():
             args.device,
             args.task_id,
             args.num_tasks,
-            args.output,
         )
     except Exception as e:
         print(f"ERROR: Pipeline failed: {e}", file=sys.stderr)

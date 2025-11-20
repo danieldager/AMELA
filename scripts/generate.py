@@ -194,10 +194,10 @@ def main():
                         "timestamp": timestamp_now("iso"),
                     })
                     
-                    if (sample_idx + 1) % 5 == 0 or (sample_idx + 1) == args.num_samples:
-                        print(f"  Generated {sample_idx + 1}/{args.num_samples} samples")
+                    # if (sample_idx + 1) % 5 == 0 or (sample_idx + 1) == args.num_samples:
+                        # print(f"  Generated {sample_idx + 1}/{args.num_samples} samples")
                 
-                print()
+                # print()
     
     csv_file.close()
     

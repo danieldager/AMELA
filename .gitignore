@@ -15,6 +15,7 @@ wheels/
 # Folders
 data/
 logs/
+wandb/
 ignore/
 output/
 metadata/

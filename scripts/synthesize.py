@@ -13,7 +13,6 @@ import torch
 import torchaudio  # type: ignore
 
 from textless.vocoders.hifigan.vocoder import CodeHiFiGANVocoder  # type: ignore
-from utils import should_skip_existing
 
 
 def synthesize_tokens(tokens, vocoder, device="cuda"):
@@ -92,7 +91,7 @@ def main():
         rel_path = pt_file.relative_to(tokens_dir)
         wav_file = speech_dir / rel_path.with_suffix(".wav")
         
-        if not should_skip_existing(wav_file, args.overwrite):
+        if not (wav_file.exists() and not args.overwrite):
             files_to_process.append((pt_file, wav_file))
 
     print(f"Tokens: {tokens_dir}")

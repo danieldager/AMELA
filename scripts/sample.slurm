@@ -110,19 +110,11 @@ echo "STAGE 4: ASR Transcription"
 echo "=========================================="
 conda activate canary
 
-# Run ASR (reads CSV directly, writes transcriptions to JSON)
-TEMP_TRANSCRIPTIONS="$OUTPUT_DIR/.temp_transcriptions.json"
+# Run ASR (updates manifest in-place)
 python -u scripts/asr.py \
     --manifest "$OUTPUT_DIR/manifest.csv" \
     --batch_size $ASR_BATCH_SIZE \
-    --max_tokens $ASR_MAX_TOKENS \
-    --output "$TEMP_TRANSCRIPTIONS"
-
-# Merge transcriptions back into CSV
-python -c "from utils import merge_transcriptions_to_csv; merge_transcriptions_to_csv('$OUTPUT_DIR/manifest.csv', '$TEMP_TRANSCRIPTIONS')"
-
-# Clean up temporary files
-rm -f "$TEMP_TRANSCRIPTIONS"
+    --max_tokens $ASR_MAX_TOKENS
 
 echo "Stage 4 complete: $(date)"
 echo

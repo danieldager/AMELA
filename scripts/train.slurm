@@ -42,16 +42,17 @@ conda activate amela_train
 # ========================================
 # HYPERPARAMETERS
 # ========================================
-EMBEDDING_DIM=2048
-HIDDEN_SIZE=4096
-NUM_LAYERS=3
-DROPOUT=0.2
-BATCH_SIZE=32
-LEARNING_RATE=0.0003
-NUM_EPOCHS=100
-TRAIN_RATIO=0.95
-EARLY_STOPPING=5
-GRAD_ACCUM_STEPS=4
+# Use environment variables if set (for grid search), otherwise use defaults
+EMBEDDING_DIM="${EMBEDDING_DIM:-2048}"
+HIDDEN_SIZE="${HIDDEN_SIZE:-4096}"
+NUM_LAYERS="${NUM_LAYERS:-3}"
+DROPOUT="${DROPOUT:-0.2}"
+BATCH_SIZE="${BATCH_SIZE:-32}"
+LEARNING_RATE="${LEARNING_RATE:-0.0003}"
+NUM_EPOCHS="${NUM_EPOCHS:-100}"
+TRAIN_RATIO="${TRAIN_RATIO:-0.95}"
+EARLY_STOPPING="${EARLY_STOPPING:-5}"
+GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-4}"
 # ========================================
 
 # Auto-detect number of GPUs and precision
@@ -83,8 +84,17 @@ echo "GPU: $GPU_NAME (${PRECISION_FLAG#--use_})"
 
 # DDP environment variables
 export OMP_NUM_THREADS=4
-export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128
-export PYTHONUNBUFFERED=1
+export PYTORCH_ALLOC_CONF=max_split_size_mb:128  # Updated from deprecated PYTORCH_CUDA_ALLOC_CONF
+export PYTHONUNBUFFERED=1  # Force Python to flush logs immediately
+
+# Distributed training debugging
+export TORCH_DISTRIBUTED_DEBUG=INFO  # Verbose logging for torchrun worker restarts
+export NCCL_DEBUG=WARN  # Log NCCL warnings/errors
+
+# Stability settings for cuDNN
+export NCCL_IB_DISABLE=1  # Disable InfiniBand if causing issues
+export CUDA_LAUNCH_BLOCKING=0  # Keep async for performance
+export TORCH_CUDNN_V8_API_ENABLED=1  # Use cuDNN v8 API
 
 echo "Launching training..."
 
@@ -127,7 +137,7 @@ torchrun \
     --num_epochs "$NUM_EPOCHS" \
     --train_ratio "$TRAIN_RATIO" \
     --early_stopping "$EARLY_STOPPING" \
-    --gradient_accumulation_steps "$GRAD_ACCUM_STEPS" \
+    --grad_accum_steps "$GRAD_ACCUM_STEPS" \
     --dataloader_num_workers 4 \
     --group_by_length \
     --seed 42 \

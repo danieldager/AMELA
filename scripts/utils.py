@@ -10,12 +10,9 @@ Import and use functions directly:
 import csv
 import json
 import shutil
-import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
-import numpy as np
 import torch
 
 
@@ -54,64 +51,49 @@ def load_manifest(manifest_path: str) -> list[dict]:
         raise ValueError(f"Unsupported manifest format: {path.suffix}")
 
 
-def csv_to_jsonl(csv_path: str, jsonl_path: str, fields: Optional[list] = None):
-    """Convert CSV to JSONL, optionally selecting specific fields."""
-    if fields is None:
-        fields = ["audio_filepath", "duration"]
-
-    with open(csv_path, "r") as csvfile, open(jsonl_path, "w") as jsonlfile:
-        reader = csv.DictReader(csvfile)
-        for row in reader:
-            entry = {}
-            for field in fields:
-                if field in row:
-                    # Convert duration to float
-                    if field == "duration":
-                        entry[field] = float(row[field])
-                    else:
-                        entry[field] = row[field]
-            jsonlfile.write(json.dumps(entry) + "\n")
-
-    print(f"Converted {csv_path} → {jsonl_path}")
-
-
-def merge_transcriptions_to_csv(csv_path: str, transcriptions_path: str):
-    """Merge transcriptions JSON into CSV, adding 'text' column."""
-    # Read transcriptions
-    with open(transcriptions_path, "r") as f:
-        transcriptions = json.load(f)
-
-    # Read CSV and add text column
-    rows = []
-    with open(csv_path, "r") as f:
-        reader = csv.DictReader(f)
-        fieldnames = list(reader.fieldnames) if reader.fieldnames else []
-
-        # Add 'text' field if not present
-        if "text" not in fieldnames:
-            fieldnames.append("text")
-
-        for row in reader:
-            row["text"] = transcriptions.get(row["audio_filepath"], "")
-            rows.append(row)
-
-    # Write updated CSV
-    with open(csv_path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
-
-    print(f"Merged {len(transcriptions)} transcriptions into {csv_path}")
-
-
-def merge_asr_task_outputs(manifest_path: str, output_path: Optional[str] = None):
+def save_manifest(entries: list[dict], manifest_path: str):
     """
-    Merge distributed ASR task outputs into final JSONL manifest.
+    Save manifest to CSV or JSONL file.
 
     Args:
-        manifest_path: Path to original manifest (to find transcriptions dir)
-        output_path: Optional output path (default: output/{dataset}.jsonl)
+        entries: List of dict entries
+        manifest_path: Path to .csv or .jsonl file
+    """
+    path = Path(manifest_path)
 
+    if path.suffix in [".jsonl", ".json"]:
+        with open(path, "w") as f:
+            for entry in entries:
+                f.write(json.dumps(entry) + "\n")
+    elif path.suffix == ".csv":
+        if not entries:
+            return
+
+        # Collect all unique field names
+        fieldnames = []
+        for entry in entries:
+            for key in entry.keys():
+                if key not in fieldnames:
+                    fieldnames.append(key)
+
+        with open(path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(entries)
+    else:
+        raise ValueError(f"Unsupported manifest format: {path.suffix}")
+
+
+def merge_asr_task_outputs(manifest_path: str):
+    """
+    Merge distributed ASR task outputs and update the original manifest.
+    
+    Reads intermediate JSON files from .{manifest_stem}_transcriptions/ directory,
+    merges them, updates the manifest with transcriptions, and cleans up.
+
+    Args:
+        manifest_path: Path to original manifest (CSV or JSONL)
+    
     Returns:
         True if successful, False otherwise
     """
@@ -122,20 +104,13 @@ def merge_asr_task_outputs(manifest_path: str, output_path: Optional[str] = None
 
     if not transcriptions_dir.exists():
         print(f"ERROR: Transcriptions directory not found: {transcriptions_dir}")
+        print(f"Expected: {transcriptions_dir}")
         return False
-
-    # Extract dataset name
-    dataset_name = manifest_path_obj.stem.split("_")[0]
-
-    if output_path is None:
-        output_dir = Path("output")
-        output_dir.mkdir(exist_ok=True)
-        output_path = str(output_dir / f"{dataset_name}.jsonl")
 
     print("=" * 60)
     print(f"Merging ASR task outputs")
     print(f"Transcriptions: {transcriptions_dir}")
-    print(f"Output: {output_path}")
+    print(f"Manifest: {manifest_path}")
     print("=" * 60)
 
     # Load all task files
@@ -155,68 +130,29 @@ def merge_asr_task_outputs(manifest_path: str, output_path: Optional[str] = None
                 all_transcriptions.update(task_data)
                 print(f"  {task_file.name}: {len(task_data)} entries")
 
-    print(f"Total: {len(all_transcriptions)} transcriptions")
+    print(f"Total transcriptions: {len(all_transcriptions)}")
 
-    # Write merged manifest
-    with open(output_path, "w") as f:
-        for audio_path, text in all_transcriptions.items():
-            f.write(json.dumps({"audio_filepath": audio_path, "text": text}) + "\n")
+    # Load manifest and update with transcriptions
+    print(f"Updating manifest: {manifest_path}")
+    entries = load_manifest(manifest_path)
+    
+    updated_count = 0
+    for entry in entries:
+        audio_path = entry["audio_filepath"]
+        if audio_path in all_transcriptions:
+            entry["text"] = all_transcriptions[audio_path]
+            updated_count += 1
+    
+    # Save updated manifest
+    save_manifest(entries, manifest_path)
+    print(f"✓ Updated {updated_count} entries in manifest")
 
-    print(f"✓ Written: {output_path} ({len(all_transcriptions)} entries)")
-
-    # Clean up
+    # Clean up intermediate files
     shutil.rmtree(transcriptions_dir)
     print(f"✓ Cleaned up: {transcriptions_dir}")
+    print("=" * 60)
 
     return True
-
-
-# ==========================================
-# Audio Processing
-# ==========================================
-
-
-def load_audio_mono(audio_path: str, backend: str = "soundfile"):
-    """
-    Load audio and convert to mono if needed.
-
-    Args:
-        audio_path: Path to audio file
-        backend: 'soundfile' or 'torchaudio'
-
-    Returns:
-        Tuple of (waveform, sample_rate)
-    """
-    if backend == "soundfile":
-        import soundfile as sf
-
-        waveform, sr = sf.read(audio_path, dtype="float32")
-        if waveform.ndim > 1:
-            waveform = waveform.mean(axis=1)
-        return waveform, sr
-
-    elif backend == "torchaudio":
-        import torchaudio
-
-        waveform, sr = torchaudio.load(audio_path)
-        if waveform.shape[0] > 1:
-            waveform = waveform[0:1, :]
-        return waveform, sr
-    else:
-        raise ValueError(f"Unknown backend: {backend}")
-
-
-def resample_to_16khz(waveform: torch.Tensor, orig_sr: int) -> torch.Tensor:
-    """Resample audio to 16kHz if needed."""
-    import torchaudio
-
-    TARGET_SR = 16000
-
-    if orig_sr != TARGET_SR:
-        return torchaudio.functional.resample(
-            waveform, orig_freq=orig_sr, new_freq=TARGET_SR
-        )
-    return waveform
 
 
 # ==========================================
@@ -257,13 +193,6 @@ def timestamp_now(fmt: str = "full") -> str:
 # ==========================================
 
 
-def get_device(prefer_cuda: bool = True) -> str:
-    """Get available device, preferring CUDA if available."""
-    if prefer_cuda and torch.cuda.is_available():
-        return "cuda"
-    return "cpu"
-
-
 def print_device_info():
     """Print GPU information if available."""
     if torch.cuda.is_available():
@@ -272,18 +201,3 @@ def print_device_info():
         print(f"GPU: {gpu_name} ({gpu_mem:.1f} GB)")
     else:
         print("Device: CPU")
-
-
-# ==========================================
-# Path Utilities
-# ==========================================
-
-
-def extract_dataset_name(manifest_path: str) -> str:
-    """Extract dataset name from manifest filename (before first underscore)."""
-    return Path(manifest_path).stem.split("_")[0]
-
-
-def should_skip_existing(output_path: Path, overwrite: bool = False) -> bool:
-    """Check if file should be skipped (exists and not overwriting)."""
-    return output_path.exists() and not overwrite
