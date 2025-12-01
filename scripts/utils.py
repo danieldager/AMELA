@@ -4,7 +4,7 @@ Shared utility functions for AMELA pipeline scripts.
 Consolidates common patterns across generate, synthesize, VAD, ASR, etc.
 
 Import and use functions directly:
-    from utils import load_manifest, distribute_tasks, print_device_info
+    from utils import load_manifest_rows, round_robin, print_device_info
 """
 
 import csv
@@ -21,10 +21,9 @@ import torch
 # ==========================================
 
 
-def load_manifest(manifest_path: str) -> list[dict]:
+def load_manifest_rows(manifest_path: str) -> list[dict]:
     """
-    Load manifest from CSV or JSONL file.
-    Automatically converts CSV to appropriate format for downstream tasks.
+    Load manifest rows from CSV or JSONL file.
 
     Args:
         manifest_path: Path to .csv or .jsonl file
@@ -33,20 +32,16 @@ def load_manifest(manifest_path: str) -> list[dict]:
         List of dict entries
     """
     path = Path(manifest_path)
-
-    if path.suffix in [".jsonl", ".json"]:
-        with open(path, "r") as f:
-            return [json.loads(line) for line in f]
-    elif path.suffix == ".csv":
+    
+    if path.suffix == ".csv":
         with open(path, "r") as f:
             reader = csv.DictReader(f)
-            entries = []
-            for row in reader:
-                # Convert duration to float if present
-                if "duration" in row:
-                    row["duration"] = float(row["duration"])
-                entries.append(row)
-            return entries
+            return list(reader)
+        
+    elif path.suffix in [".jsonl", ".json"]:
+        with open(path, "r") as f:
+            return [json.loads(line) for line in f]
+    
     else:
         raise ValueError(f"Unsupported manifest format: {path.suffix}")
 
@@ -134,7 +129,7 @@ def merge_asr_task_outputs(manifest_path: str):
 
     # Load manifest and update with transcriptions
     print(f"Updating manifest: {manifest_path}")
-    entries = load_manifest(manifest_path)
+    entries = load_manifest_rows(manifest_path)
     
     updated_count = 0
     for entry in entries:
@@ -160,7 +155,7 @@ def merge_asr_task_outputs(manifest_path: str):
 # ==========================================
 
 
-def distribute_tasks(items: list, task_id: int, num_tasks: int) -> list:
+def round_robin(items: list, task_id: int, num_tasks: int) -> list:
     """Distribute items across parallel tasks using round-robin."""
     return [item for i, item in enumerate(items) if i % num_tasks == task_id]
 
@@ -201,3 +196,109 @@ def print_device_info():
         print(f"GPU: {gpu_name} ({gpu_mem:.1f} GB)")
     else:
         print("Device: CPU")
+
+
+# ==========================================
+# ASR Evaluation Result Merging
+# ==========================================
+
+
+def merge_eval_results(output_name: str = None):
+    """
+    Merge per-task ASR evaluation CSV files into a single consolidated file.
+
+    Reads all CSV files from output/.asr_eval_results/ directory,
+    merges them, saves to output/asr_eval_{timestamp}.csv, and cleans up.
+
+    Args:
+        output_name: Optional output filename (default: auto-generated with timestamp)
+
+    Returns:
+        True if successful, False otherwise
+    """
+    results_dir = Path("output") / ".asr_eval_results"
+
+    if not results_dir.exists():
+        print(f"ERROR: Results directory not found: {results_dir}")
+        return False
+
+    print("=" * 60)
+    print("Merging ASR Evaluation Results")
+    print("=" * 60)
+
+    # Find all task CSV files
+    csv_files = sorted(results_dir.glob("task_*.csv"))
+
+    if not csv_files:
+        print("ERROR: No task CSV files found")
+        return False
+
+    print(f"Found {len(csv_files)} task files:")
+    for csv_file in csv_files:
+        print(f"  {csv_file.name}")
+
+    # Read and merge all CSV files
+    all_rows = []
+    header = None
+
+    for csv_file in csv_files:
+        with open(csv_file, "r") as f:
+            reader = csv.DictReader(f)
+            if header is None:
+                header = reader.fieldnames
+            for row in reader:
+                all_rows.append(row)
+
+    print(f"Total rows: {len(all_rows)}")
+
+    # Generate output filename
+    if output_name is None:
+        timestamp = datetime.now().strftime("%d-%m-%y_%H-%M-%S")
+        output_name = f"asr_eval_{timestamp}.csv"
+
+    output_path = Path("output") / output_name
+
+    # Write merged CSV
+    with open(output_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=header)
+        writer.writeheader()
+        writer.writerows(all_rows)
+
+    print(f"✓ Merged results saved to: {output_path}")
+
+    # Print summary statistics
+    print("\nSummary:")
+    splits = set(row["split"] for row in all_rows)
+    models = set(row["model"] for row in all_rows)
+    audio_types = set(row["audio_type"] for row in all_rows)
+
+    print(f"  Splits: {', '.join(sorted(splits))}")
+    print(f"  Models: {', '.join(sorted(models))}")
+    print(f"  Audio types: {', '.join(sorted(audio_types))}")
+
+    # Compute average WER/CER per model/audio_type
+    print("\nAverage Metrics:")
+    for model in sorted(models):
+        for audio_type in sorted(audio_types):
+            matching_rows = [
+                row
+                for row in all_rows
+                if row["model"] == model and row["audio_type"] == audio_type
+            ]
+            if matching_rows:
+                avg_wer = sum(float(row["wer"]) for row in matching_rows) / len(
+                    matching_rows
+                )
+                avg_cer = sum(float(row["cer"]) for row in matching_rows) / len(
+                    matching_rows
+                )
+                print(
+                    f"  {model:20} | {audio_type:13} | WER: {avg_wer:.3f} | CER: {avg_cer:.3f}"
+                )
+
+    # Clean up intermediate files
+    shutil.rmtree(results_dir)
+    print(f"\n✓ Cleaned up: {results_dir}")
+    print("=" * 60)
+
+    return True

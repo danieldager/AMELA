@@ -1,485 +1,156 @@
 # AMELA - Acoustic Modeling for Early Language Acquisition
 
-Three independent speech processing pipelines for HPC/SLURM clusters. Each has its own Conda environment due to incompatible dependencies.
+Speech processing pipelines for HPC/SLURM clusters.
 
 ---
 
-## Quick Start
+## Conda Environments
 
-```bash
-# 1. Choose your pipeline
-conda activate vad     # Voice Activity Detection (CPU)
-conda activate sts     # Speech-to-Speech resynthesis (GPU)
-conda activate asr     # Speech Recognition (GPU)
-
-# 2. Run it
-sbatch scripts/vad.slurm /path/to/audio/
-sbatch scripts/sts.slurm metadata/manifest.json dataset_name
-sbatch scripts/asr.slurm metadata/manifest.json
-```
-
----
-
-## Pipeline 1: Voice Activity Detection (VAD)
-
-**What it does**: Analyzes audio files to find speech/silence segments and duration statistics.
-
-**Environment**: Python 3.11+, CPU-only, multiprocessing
+| Environment | Python | Pipelines |
+|-------------|--------|-----------|
+| `vad` | 3.11+ | VAD |
+| `sts` | 3.9 | STS, Encoding, Synthesis |
+| `train` | 3.10+ | Training, Generation |
+| `asr` | 3.10+ | ASR, ASR Evaluation |
 
 ### Setup
 
 ```bash
-conda create -n vad python=3.11 -y
-conda activate vad
-pip install git+https://github.com/TEN-framework/ten-vad.git
-pip install pandas soundfile torch torchaudio numpy
-```
+# VAD
+conda create -n vad python=3.11 -y && conda activate vad
+pip install git+https://github.com/TEN-framework/ten-vad.git pandas soundfile torch torchaudio numpy
 
-### Usage
-
-```bash
-# Process directory of WAV files (searches recursively)
-sbatch scripts/vad.slurm /path/to/audio/directory
-
-# Custom output location
-sbatch scripts/vad.slurm /path/to/audio metadata/custom_name
-```
-
-**Outputs**:
-- `metadata/<dirname>_<date>.csv` - Full VAD statistics (max-spoken, min-spoken, spch-ratio, etc.)
-- `metadata/<dirname>_<date>.json` - JSONL manifest with only `audio_filepath` and `duration`
-
-**Use the `.json` file as input for STS and ASR pipelines.**
-
----
-
-## Pipeline 2: Speech-to-Speech (STS)
-
-**What it does**: Resynthesizes audio through discrete units (mHuBERT encoder + HiFi-GAN vocoder).
-
-**Environment**: Python 3.9, GPU required, uses 2021 fairseq checkpoints
-
-### Setup
-
-```bash
-conda create -n sts python=3.9 -y
-conda activate sts
-
-# Install textlesslib
+# STS / Synthesis
+conda create -n sts python=3.9 -y && conda activate sts
 git clone https://github.com/facebookresearch/textlesslib.git
 pip install -e textlesslib/
-
-# Install specific fairseq commit
 pip install git+https://github.com/pytorch/fairseq.git@dd106d9534b22e7db859a6b87ffd7780c38341f8
-
-# Install dependencies with exact versions
 pip install 'omegaconf==2.0.6' 'hydra-core==1.0.7' h5py pandas==1.5.3
+
+# Encoding
+conda create -n textless python=3.9 -y && conda activate textless
+# Same as STS environment
+
+# Training / Generation
+conda create -n train python=3.10 -y && conda activate train
+pip install torch pandas numpy transformers accelerate wandb
+
+# ASR / ASR Evaluation
+conda create -n asr python=3.10 -y && conda activate asr
+pip install "nemo_toolkit[all]" torch torchaudio transformers whisper-normalizer jiwer
 ```
 
-**Critical Fix**: Edit `textlesslib/textless/data/hubert_feature_reader.py` line 32:
-
-```python
-# Change this line:
-model, _, task = fairseq.checkpoint_utils.load_model_ensemble_and_task([self.checkpoint_path])
-
-# To this (add strict=False):
-model, _, task = fairseq.checkpoint_utils.load_model_ensemble_and_task(
-    [self.checkpoint_path],
-    strict=False,
-)
-```
-
-This allows loading old checkpoints with incompatible weight shapes. See `TECHNICAL.md` for details.
-
-### Usage
-
-```bash
-# Full run with 16 parallel tasks
-sbatch --array=0-15 scripts/sts.slurm metadata/input.json dataset_name
-
-# Test with 1 file
-sbatch --array=0 scripts/sts.slurm metadata/input.json dataset_name
-
-# Rerun specific failed tasks (maintains original 16-task split)
-sbatch --array=0,5,12 scripts/sts.slurm metadata/input.json dataset_name 16
-```
-
-**Input**: JSONL manifest with `audio_filepath` and `duration`  
-**Output**: `output/<dataset_name>/` - Resynthesized 16kHz WAV files preserving directory structure
-
-**Notes**:
-- Automatically resamples input to 16kHz (mHuBERT requirement)
-- Skips already-processed files (resume-friendly)
-- Dataset name must appear in the input paths (e.g., `/path/to/expresso/audio/file.wav` with `dataset_name=expresso`)
+**STS Critical Fix**: Edit `textlesslib/textless/data/hubert_feature_reader.py` line 32 - add `strict=False` to `load_model_ensemble_and_task()`. See `TECHNICAL.md`.
 
 ---
 
-## Pipeline 3: Automatic Speech Recognition (ASR)
+## Pipelines
 
-**What it does**: Transcribes speech using NVIDIA Canary-Qwen-2.5B model.
-
-**Environment**: Python 3.10+, GPU required
-
-### Setup
+### 1. VAD - Voice Activity Detection
 
 ```bash
-conda create -n asr python=3.10 -y
-conda activate asr
-pip install "nemo_toolkit[all]"
+sbatch scripts/vad.slurm /path/to/audio/
 ```
 
-### Usage
+**Output**: `metadata/<dirname>_<date>.csv` (VAD stats), `metadata/<dirname>_<date>.json` (manifest)
+
+### 2. STS - Speech-to-Speech Resynthesis
 
 ```bash
-# Process with 16 parallel GPU tasks
+sbatch --array=0-15 scripts/sts.slurm metadata/input.json
+```
+
+**Input**: JSONL with `audio_filepath`, `duration`  
+**Output**: `output/<dataset>/` - Resynthesized 16kHz audio
+
+### 3. ASR - Speech Recognition
+
+```bash
 sbatch --array=0-15 scripts/asr.slurm metadata/input.json
 
-# Single task for testing
-sbatch --array=0 scripts/asr.slurm metadata/input.json
-
-# After all tasks complete, merge results
-python scripts/merge_manifest.py --manifest metadata/input.json
+# After all tasks complete:
+python -c "from utils import merge_asr_task_outputs; merge_asr_task_outputs('metadata/input.json')"
 ```
 
-**Input**: JSONL manifest with `audio_filepath` and `duration`  
-**Output**: Updates input manifest in-place, adding `"text"` field with transcriptions
+**Input**: JSONL with `audio_filepath`, `duration`  
+**Output**: Updates manifest with `text` field
 
-**How it works**:
-1. Each GPU task reads the full manifest
-2. Task N processes files where `index % num_tasks == N` (round-robin)
-3. Each task writes task-specific results to `.metadata/<basename>_transcriptions/task_XXXX.json`
-4. Merge script combines all task files back into the original manifest
-5. Temporary transcription files are cleaned up
+### 4. Encoding - Audio to Tokens
 
-**Notes**:
-- Auto-detects GPU memory and adjusts batch size (8-16)
-- Skips entries that already have a `"text"` field (resume-friendly)
-- Uses file locking for safe concurrent writes
+```bash
+sbatch --array=0-5 scripts/encode.slurm metadata/input.csv
+```
+
+**Input**: CSV with `audio_filepath`, `file_id`  
+**Output**: `.pt` token files
+
+### 5. Training - LSTM Language Model
+
+```bash
+# Single run
+sbatch scripts/train.slurm metadata/manifest.csv output/tokens_dir
+
+# Grid search
+python scripts/grid.py --manifest metadata/manifest.csv --tokens_dir output/tokens_dir
+```
+
+**Output**: `checkpoints/lstm_*/` - Model checkpoints
+
+### 6. Generation & Synthesis
+
+```bash
+# Generate tokens
+sbatch scripts/generate.slurm <model_name> <dataset_name>
+
+# Synthesize audio
+sbatch scripts/synthesize.slurm output/generations/<model_name>
+```
+
+**Output**: `.pt` token files → `.wav` audio files
+
+### 7. ASR Evaluation
+
+```bash
+sbatch scripts/asr_eval.slurm metadata/ls-clean.csv
+```
+
+**Input**: CSV with `file_id`, `audio_filepath`, `transcription`  
+**Output**: Updates manifest with WER/CER columns, saves `output/<split>_global_metrics.csv`
 
 ---
 
-## Data Format: JSONL Manifests
+## Data Formats
 
-All pipelines use **newline-delimited JSON** (`.json` extension, JSONL format):
+**CSV**: Standard with headers (`file_id`, `audio_filepath`, `transcription`, etc.)
 
+**JSONL** (`.json`):
 ```json
-{"audio_filepath": "/absolute/path/to/file1.wav", "duration": 21.4}
-{"audio_filepath": "/absolute/path/to/file2.wav", "duration": 33.2}
+{"audio_filepath": "/absolute/path/file.wav", "duration": 21.4}
 ```
-
-**Important**: Always use **absolute paths** - compute nodes may have different `$PWD`.
-
-After ASR processing, entries have an additional field:
-```json
-{"audio_filepath": "/absolute/path/file.wav", "duration": 21.4, "text": "transcription here"}
-```
-
----
-
-## File Structure
-
-```
-/scratch2/ddager/amela/
-├── scripts/
-│   ├── vad.py              # VAD processing script
-│   ├── vad.slurm           # VAD SLURM launcher
-│   ├── sts.py              # STS processing script
-│   ├── sts.slurm           # STS SLURM launcher
-│   ├── asr.py              # ASR processing script
-│   ├── asr.slurm           # ASR SLURM launcher
-│   └── merge_manifest.py   # ASR result merger
-├── metadata/               # Input/output manifests
-├── output/                 # STS resynthesized audio
-└── logs/                   # SLURM job logs
-```
-
----
-
-## Common Workflows
-
-### Process new dataset from scratch
-
-```bash
-# 1. Generate manifest with VAD
-conda activate vad
-sbatch scripts/vad.slurm /path/to/dataset/audio/
-# Creates: metadata/audio_<date>.json
-
-# 2. Resynthesize audio
-conda activate sts
-sbatch --array=0-15 scripts/sts.slurm metadata/audio_<date>.json dataset_name
-# Creates: output/dataset_name/**/*.wav
-
-# 3. Transcribe audio
-conda activate asr
-sbatch --array=0-15 scripts/asr.slurm metadata/audio_<date>.json
-python scripts/merge_manifest.py --manifest metadata/audio_<date>.json
-# Updates: metadata/audio_<date>.json (adds "text" field)
-```
-
-### Resume interrupted job
-
-All pipelines skip already-processed files:
-
-```bash
-# STS: Skips files that exist in output/
-sbatch --array=0-15 scripts/sts.slurm metadata/input.json dataset_name
-
-# ASR: Skips entries with "text" field
-sbatch --array=0-15 scripts/asr.slurm metadata/input.json
-```
-
-### Check job status
-
-```bash
-# List your jobs
-squeue -u $USER
-
-# Watch real-time logs
-tail -f logs/sts_JOBID_TASKID.out
-tail -f logs/asr_JOBID_TASKID.out
-tail -f logs/vad_JOBID.out
-
-# Check for errors
-grep ERROR logs/*.err
-```
-
----
-
-## Pipeline 4: LSTM Language Model Training
-
-**What it does**: Trains LSTM models on discrete audio tokens for language modeling.
-
-**Environment**: Python 3.10+, GPU recommended
-
-**Prerequisites**: Audio tokens from encoding pipeline (`.pt` files in `output/librivox_mhubert_expresso_2000/`)
-
-### Setup
-
-```bash
-conda create -n amela_train python=3.10 -y
-conda activate amela_train
-pip install torch pandas numpy transformers accelerate
-```
-
-### Usage
-
-**Single training run**:
-```bash
-python scripts/train.py \
-    --manifest metadata/librivox_29-10-25.csv \
-    --tokens_dir output/librivox_mhubert_expresso_2000 \
-    --embedding_dim 256 \
-    --hidden_size 512 \
-    --num_layers 2 \
-    --dropout 0.1 \
-    --batch_size 32 \
-    --learning_rate 0.001 \
-    --num_epochs 100 \
-    --early_stopping 10
-```
-
-**Grid search with SLURM** (recommended):
-```bash
-# Submit array job - tests 16 hyperparameter combinations in parallel
-sbatch scripts/train.slurm \
-    metadata/librivox_29-10-25.csv \
-    output/librivox_mhubert_expresso_2000
-
-# Monitor progress
-tail -f logs/train_JOBID_TASKID.out
-```
-
-**Outputs**:
-- `checkpoints/lstm_r{lr}_h{hidden}_e{emb}_l{layers}_b{batch}_d{dropout}/` - Model checkpoints
-- `logs/train_JOBID_TASKID.out` - Training logs
-
-**Default Grid Search** (edit `train.slurm` to customize):
-- `embedding_dim`: [128, 256]
-- `hidden_size`: [256, 512]
-- `num_layers`: [2, 3]
-- `dropout`: [0.1, 0.2]
-
-Total: 16 combinations tested in parallel
-
-**Key Features**:
-- **Nested Tensors**: Efficient variable-length sequences (no padding waste)
-- **Memory Optimization**: Loads dataset into RAM (~3GB) for speed
-  - Use `--load_on_the_fly` flag if memory-constrained
-- **Early Stopping**: Stops after 10 epochs without improvement
-- **Automatic Checkpointing**: Saves best 3 checkpoints based on validation loss
-
-**Token Format**:
-- Vocab: 0-1999 (mHuBERT k-means clusters)
-- SOS token: 2000 (prepended to all sequences)
-- Total vocabulary: 2001 tokens
-
----
-
-## Pipeline 5: LSTM Generation & Synthesis
-
-**What it does**: Generates audio token sequences from trained LSTM models and synthesizes them to audio.
-
-**Environments**: 
-- Generation: `amela_train` (Python 3.10+, GPU recommended)
-- Synthesis: `sts` (Python 3.9, GPU required)
-
-**Prerequisites**: Trained LSTM model in `checkpoints/`
-
-### Generate Tokens
-
-**Single model**:
-```bash
-# Generate with default parameters
-sbatch scripts/generate.slurm lstm_r0.0003_h512_e256_l2_b256_d0.1
-
-# Generate from specific checkpoint
-sbatch scripts/generate.slurm lstm_r0.0003_h512_e256_l2_b256_d0.1 5
-```
-
-**Multiple models** (array job):
-```bash
-# Edit MODELS array in generate.slurm, then:
-sbatch --array=0-2 scripts/generate.slurm
-```
-
-**Custom parameters**:
-```bash
-conda activate amela_train
-python scripts/generate.py \
-    --model lstm_r0.0003_h512_e256_l2_b256_d0.1 \
-    --num_samples 10 \
-    --temperatures 0.7,1.0,1.3 \
-    --top_k 50,None \
-    --top_p 0.95,None \
-    --max_length 500
-```
-
-**Outputs**:
-- `output/generations/{model_name}/temp0.8_topk50_topp0.9_00001.pt` - Token files
-- `output/generations/{model_name}/generation_log.csv` - Generation metadata
-
-### Synthesize Audio
-
-**After token generation**:
-```bash
-# Synthesize all .pt files in a directory
-sbatch scripts/synthesize.slurm output/generations/lstm_r0.0003_h512_e256_l2_b256_d0.1
-
-# Overwrite existing .wav files
-sbatch scripts/synthesize.slurm output/generations/lstm_r0.0003_h512_e256_l2_b256_d0.1 --overwrite
-```
-
-**Outputs**:
-- `.wav` files created next to each `.pt` file (16kHz, same naming)
-
-**Default Generation Grid**:
-- `temperatures`: [0.8, 1.0, 1.2]
-- `top_k`: [50, 100, None]
-- `top_p`: [0.9, 0.95, None]
-- `num_samples`: 5 per combination
-- `max_length`: 500 tokens (~20 seconds at 25 Hz)
-
-Total: 45 samples per model (3×3×3×5)
-
-**Key Features**:
-- **Auto SOS Stripping**: Synthesis automatically removes SOS token before vocoding
-- **Internal SOS Detection**: Flags if SOS appears mid-sequence (logged in CSV)
-- **Resume-Friendly**: Synthesis skips existing .wav files unless `--overwrite`
-- **Flexible Sampling**: Customize temperature, top-k, top-p per run
 
 ---
 
 ## Troubleshooting
 
 ### STS: "OmegaConf validation error"
-- **Cause**: Old checkpoints store integers as floats
-- **Fix**: Already handled by monkey-patches in `sts.py`
-- **Details**: See `TECHNICAL.md`
+Already handled by monkey-patches in `sts.py`. See `TECHNICAL.md`.
 
 ### STS: "Weight normalization shape mismatch"
-- **Cause**: Old checkpoint format incompatible with modern PyTorch
-- **Fix**: Must edit `textlesslib/textless/data/hubert_feature_reader.py` (see Setup above)
+Edit `textlesslib/textless/data/hubert_feature_reader.py` - add `strict=False`.
 
 ### ASR: "Task X wrote but text field missing"
-- **Cause**: Task crashed before writing results
-- **Fix**: Rerun specific task: `sbatch --array=X scripts/asr.slurm manifest.json`
+Rerun failed task: `sbatch --array=X scripts/asr.slurm manifest.json`
 
 ### VAD: "No WAV files found"
-- **Cause**: Directory doesn't contain `.wav` files or wrong path
-- **Fix**: Check path and file extensions
-
-### All: "Conda environment not found"
-- **Cause**: Environment not activated or doesn't exist
-- **Fix**: Follow Setup instructions for each pipeline
-
----
-
-## SLURM Array Jobs
-
-All GPU pipelines use **array jobs** for parallelization:
-
-```bash
-# Run 16 tasks in parallel
-sbatch --array=0-15 scripts/sts.slurm ...
-
-# Limit to 7 concurrent tasks (GPU availability)
-sbatch --array=0-15%7 scripts/sts.slurm ...
-
-# Run specific tasks only
-sbatch --array=0,5,12 scripts/sts.slurm ...
-```
-
-**How it works**:
-- Each task gets unique `SLURM_ARRAY_TASK_ID` (0, 1, 2, ...)
-- Task N processes files where `file_index % num_tasks == N` (round-robin)
-- Tasks run independently and can be on different nodes
-
-**Benefits**:
-- Near-linear speedup (16 tasks ≈ 16× faster)
-- Fault-tolerant (one task fails, others continue)
-- Easy to resume (rerun just failed tasks)
-
----
-
-## Why Three Separate Environments?
-
-**Incompatible dependencies**:
-
-| Pipeline | Python | Key Deps | Reason |
-|----------|--------|----------|--------|
-| VAD | 3.11+ | TEN-VAD, numpy | Modern libraries, CPU-optimized |
-| STS | 3.9 | fairseq@dd106d9, omegaconf==2.0.6 | 2021 checkpoints, old APIs |
-| ASR | 3.10+ | NeMo toolkit | GPU-optimized, modern PyTorch |
-
-Mixing these would cause version conflicts and import errors.
-
----
-
-## Performance Notes
-
-**VAD** (CPU):
-- ~100-200 files/sec on 32 cores
-- Scales linearly with CPU count
-- Bottleneck: I/O for short files
-
-**STS** (GPU):
-- ~1 file/sec per GPU (depends on duration)
-- Memory: ~2GB per task
-- Bottleneck: Encoder inference
-
-**ASR** (GPU):
-- ~400× real-time factor per GPU
-- Memory: Scales with batch size (8-16)
-- Bottleneck: Model forward pass
+Check path and file extensions.
 
 ---
 
 ## References
 
-g- [Textlesslib](https://github.com/facebookresearch/textlesslib) - Discrete speech units
-- [Fairseq](https://github.com/pytorch/fairseq) - Sequence modeling toolkit
-- [TEN-VAD](https://github.com/TEN-framework/ten-vad) - Voice activity detection
-- [NeMo](https://github.com/NVIDIA/NeMo) - Speech AI toolkit
+- [Textlesslib](https://github.com/facebookresearch/textlesslib)
+- [TEN-VAD](https://github.com/TEN-framework/ten-vad)
+- [NeMo](https://github.com/NVIDIA/NeMo)
+- [LibriSpeech](https://www.openslr.org/12)
 
-For implementation details and compatibility fixes, see **TECHNICAL.md**.
+See **TECHNICAL.md** for implementation details.

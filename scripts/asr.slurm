@@ -41,7 +41,7 @@ echo "=========================================="
 
 # Activate conda environment
 source ~/.bashrc
-conda activate canary
+conda activate asr
 
 # Run ASR script
 python -u scripts/asr.py \

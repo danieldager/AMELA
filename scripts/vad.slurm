@@ -2,7 +2,7 @@
 #SBATCH --job-name=vad
 #SBATCH --output=logs/vad_%j.out
 #SBATCH --error=logs/vad_%j.err
-#SBATCH --cpus-per-task=48
+#SBATCH --cpus-per-task=36
 #SBATCH --mem=64G
 #SBATCH --time=12:00:00
 #SBATCH --partition=cpu

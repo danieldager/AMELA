@@ -289,7 +289,7 @@ def main():
     parser.add_argument(
         "dataset",
         type=str,
-        help="Directory containing WAV files (searches recursively)",
+        help="Directory containing audio files (searches recursively for .wav and .flac)",
     )
     parser.add_argument(
         "--output",
@@ -326,12 +326,12 @@ def main():
         sys.exit(1)
 
     # Find WAV files recursively
-    wavs = list(dataset.rglob("*.wav"))
+    wavs = list(dataset.rglob("*.wav")) + list(dataset.rglob("*.flac"))
     if not wavs:
-        print(f"ERROR: No WAV files found in {dataset}", file=sys.stderr)
+        print(f"ERROR: No WAV/FLAC files found in {dataset}", file=sys.stderr)
         sys.exit(1)
 
-    print(f"Found {len(wavs)} WAV files in {dataset}")
+    print(f"Found {len(wavs)} audio files in {dataset}")
 
     # Auto-detect workers
     if args.workers is None:

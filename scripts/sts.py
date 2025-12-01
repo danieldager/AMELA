@@ -23,6 +23,7 @@ The main issues addressed:
 For detailed documentation, see: scripts/README.md
 """
 
+import sys
 import argparse
 import warnings
 from pathlib import Path
@@ -33,6 +34,9 @@ import torch  # type: ignore
 import torchaudio  # type: ignore
 import torchaudio.transforms as T  # type: ignore
 
+from utils import load_manifest_rows
+
+sys.path.insert(0, str(Path(__file__).parent))
 warnings.filterwarnings("ignore")
 
 # OmegaConf patch: convert floats to ints
@@ -140,41 +144,31 @@ def _patched_load_checkpoint(path, *args, **kwargs):
 
 fairseq.checkpoint_utils.load_checkpoint_to_cpu = _patched_load_checkpoint
 
-# Import shared utilities
-import sys
-sys.path.insert(0, str(Path(__file__).parent))
-from utils import load_manifest  # type: ignore
-
-
-def process_manifest(
-    manifest_path: str, dataset_name: str, task_id: int = 0, num_tasks: int = 1
-):
+def process_manifest(manifest_path: str, task_id: int = 0, num_tasks: int = 1):
     """
     Process all audio files from manifest.
-    
+
     Args:
         manifest_path: Path to input manifest (CSV or JSONL)
-        dataset_name: Name of dataset (used for output directory)
         task_id: Task ID for parallel processing (default: 0)
         num_tasks: Total number of parallel tasks (default: 1)
     """
 
     # Load manifest
-    now = datetime.now().strftime("%H:%M:%S")
-    print(f"[{now}] Reading manifest: {manifest_path}")
-    entries = load_manifest(manifest_path)
-    now = datetime.now().strftime("%H:%M:%S")
-    print(f"[{now}] Loaded {len(entries)} entries")
-
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Reading manifest: {manifest_path}")
+    entries = load_manifest_rows(manifest_path)
+    dataset_name = manifest_path.split("/")[-1].split(".")[0].split("_")[0]
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Loaded {len(entries)} entries")
+    
     # Filter for this task (array job parallelization)
     if num_tasks > 1:
         entries = [e for i, e in enumerate(entries) if i % num_tasks == task_id]
         print(f"Task {task_id}/{num_tasks}: Processing {len(entries)} files")
 
-    # Load encoder and vocoder
+    SAMPLE_RATE = 16000
     dense_model, quantizer, vocab_size = (
         "mhubert-base-vp_mls_cv_8lang",
-        "kmeans-expresso",
+        "kmeans",  # "kmeans-expresso",
         2000,
     )
 
@@ -189,15 +183,15 @@ def process_manifest(
     vocoder = CodeHiFiGANVocoder.by_name(dense_model, quantizer, vocab_size).cuda()
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Vocoder loaded")
 
-    SAMPLE_RATE = 16000
-    processed_count = 0
+    count = 1
+    tenth_of = len(entries) // 10
 
     for entry in entries:
         input_path = entry["audio_filepath"]
 
         # Use just the filename
         filename = Path(input_path).name
-        
+
         # Output path: flat structure under dataset name
         output_path = Path("output") / dataset_name / filename
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -206,7 +200,8 @@ def process_manifest(
             print(f"Skipping (exists): {output_path}")
             continue
 
-        print(f"Processing [{processed_count + 1}/{len(entries)}]: {input_path}")
+        if count == 1 or count % tenth_of == 0:
+            print(f"Processing [{count}/{len(entries)}]: {input_path}")
 
         try:
             # Load and preprocess audio
@@ -226,7 +221,7 @@ def process_manifest(
             # Encode: Audio → Discrete Units
             encoded = encoder(waveform.cuda())
             units = encoded["units"]
-            
+
             # Synthesize: Discrete Units → Audio
             audio = vocoder(units)
 
@@ -236,15 +231,16 @@ def process_manifest(
                 audio.cpu().float().unsqueeze(0),
                 vocoder.output_sample_rate,
             )
-            processed_count += 1
+            count += 1
 
         except Exception as e:
             print(f"ERROR processing {input_path}: {e}")
             import traceback
+
             traceback.print_exc()
             continue
 
-    print(f"Task {task_id} completed: {processed_count}/{len(entries)} files")
+    print(f"Task {task_id} completed: {count}/{len(entries)} files")
 
 
 if __name__ == "__main__":
@@ -255,9 +251,6 @@ if __name__ == "__main__":
         "--manifest", required=True, help="Path to manifest (.csv or .jsonl)"
     )
     parser.add_argument(
-        "--dataset", required=True, help="Dataset name (e.g., 'expresso')"
-    )
-    parser.add_argument(
         "--task-id", type=int, default=0, help="Task ID for array jobs (0-indexed)"
     )
     parser.add_argument(
@@ -265,4 +258,4 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
-    process_manifest(args.manifest, args.dataset, args.task_id, args.num_tasks)
+    process_manifest(args.manifest, args.task_id, args.num_tasks)

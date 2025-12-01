@@ -36,7 +36,7 @@ logging.getLogger("nemo_logger").setLevel(logging.WARNING)
 import torch  # type: ignore
 from nemo.collections.speechlm2.models import SALM  # type: ignore
 
-from utils import load_manifest, save_manifest, distribute_tasks, print_device_info
+from utils import load_manifest_rows, save_manifest, round_robin, print_device_info
 
 
 def process_manifest(
@@ -65,10 +65,10 @@ def process_manifest(
     """
 
     # Read manifest
-    all_entries = load_manifest(manifest_path)
+    all_entries = load_manifest_rows(manifest_path)
 
     # Filter entries for this task
-    task_candidates = distribute_tasks(all_entries, task_id, num_tasks)
+    task_candidates = round_robin(all_entries, task_id, num_tasks)
     task_entries = [
         entry for entry in task_candidates if "text" not in entry or not entry["text"]
     ]

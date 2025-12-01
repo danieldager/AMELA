@@ -2,7 +2,7 @@
 #SBATCH --job-name=encode_array
 #SBATCH --output=logs/encode_%A_%a.out
 #SBATCH --error=logs/encode_%A_%a.err
-#SBATCH --array=0-4
+#SBATCH --array=0-5
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
@@ -12,14 +12,13 @@
 # Validate inputs
 if [ -z "$1" ]; then
     echo "Usage: sbatch encode.slurm <manifest_path> [dense_model] [quantizer] [vocab_size]"
-    echo "Example: sbatch encode.slurm metadata/expresso.csv"
-    echo "Example: sbatch encode.slurm metadata/expresso.csv mhubert-base-vp_mls_cv_8lang kmeans-expresso 2000"
+    echo "Example: sbatch encode.slurm metadata/expresso.csv mhubert-base-vp_mls_cv_8lang kmeans 2000"
     exit 1
 fi
 
 MANIFEST_PATH="$1"
 DENSE_MODEL="${2:-mhubert-base-vp_mls_cv_8lang}"
-QUANTIZER="${3:-kmeans-expresso}"
+QUANTIZER="${3:-kmeans}"
 VOCAB_SIZE="${4:-2000}"
 
 if [ ! -f "$MANIFEST_PATH" ]; then

@@ -16,9 +16,9 @@ from pathlib import Path
 from datetime import datetime
 
 import pandas as pd
-import soundfile as sf
+import soundfile as sf  # type: ignore
 import torch
-import torchaudio
+import torchaudio  # type: ignore
 
 warnings.filterwarnings("ignore")
 
@@ -42,11 +42,11 @@ def tokenize_manifest(
 ):
     """
     Tokenize audio files and save individual .pt files.
-    
+
     Args:
-        manifest_path: Path to CSV manifest with audio_filepath and file_id columns
+        manifest_path: Path to CSV with audio_filepath and file_id columns
         dense_model: Dense model name (e.g., "mhubert-base-vp_mls_cv_8lang")
-        quantizer: Quantizer name (e.g., "kmeans-expresso")
+        quantizer: Quantizer name (e.g., "kmeans")
         vocab_size: Vocabulary size (e.g., 2000)
         task_id: Task ID for parallel processing (default: 0)
         num_tasks: Total number of parallel tasks (default: 1)
@@ -54,7 +54,7 @@ def tokenize_manifest(
         overwrite: Overwrite existing token files (default: False)
         device: Device to use ('cuda' or 'cpu', default: 'cuda')
     """
-    
+
     print(f"========================================")
     print(f"Tokenization Task {task_id}/{num_tasks}")
     print(f"========================================")
@@ -65,29 +65,29 @@ def tokenize_manifest(
     print(f"Device: {device}")
     print(f"Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"========================================\n")
-    
+
     # Read manifest (CSV format)
     df = pd.read_csv(manifest_path)
-    
+
     # Validate required columns
     if "audio_filepath" not in df.columns:
         print(f"ERROR: Manifest must have 'audio_filepath' column")
         print(f"Found columns: {list(df.columns)}")
         return
-    
+
     if "file_id" not in df.columns:
         print(f"ERROR: Manifest must have 'file_id' column")
         print(f"Found columns: {list(df.columns)}")
         return
-    
+
     # Slice for this task (round-robin distribution)
     df = df.iloc[task_id::num_tasks].reset_index(drop=True)
     print(f"Processing {len(df)} files (task {task_id})\n")
-    
+
     if len(df) == 0:
         print("No files to process for this task")
         return
-    
+
     # Initialize encoder
     print("Loading encoder...")
     encoder = SpeechEncoder.by_name(
@@ -100,119 +100,125 @@ def tokenize_manifest(
     if device == "cuda" and torch.cuda.is_available():
         encoder = encoder.cuda()
     print(f"Encoder loaded on {device}\n")
-    
+
     # Setup output directory
     manifest_path_obj = Path(manifest_path)
-    dataset_name = manifest_path_obj.stem.split('_')[0]
-    dense_model_name = dense_model.split('-')[0]
-    quantizer_name = quantizer.split('-')[-1]
+    dataset_name = manifest_path_obj.stem.split("_")[0]
+    dense_model_name = dense_model.split("-")[0]
+    quantizer_name = quantizer.split("-")[-1]
     model_name = f"{dense_model_name}_{quantizer_name}_{vocab_size}"
 
-    output_dir = manifest_path_obj.parent / f"{dataset_name}_{model_name}"
+    output_dir = (
+        manifest_path_obj.parent.parent / "output" / f"{dataset_name}_{model_name}"
+    )
     output_dir.mkdir(exist_ok=True)
-    
+
     print(f"Output: {output_dir}/\n")
-    
+
     # Process files and save tokens
     ENCODER_SAMPLE_RATE = 16000
     processed = 0
     skipped = 0
     errors = []
-    
+
     # Timing diagnostics
-    clock = {'load': [], 'encode': [], 'write': []}
+    clock = {"load": [], "encode": [], "write": []}
     TIMING_WINDOW = 1000  # Keep last 1000 samples to avoid memory leak
-    
-    for idx, row_dict in enumerate(df.to_dict('records')):
+
+    for idx, row_dict in enumerate(df.to_dict("records")):
         audio_path = row_dict["audio_filepath"]
         file_id = str(row_dict["file_id"])
-        
+
         # Check if tokens already exist (skip if not overwriting)
         output_path = output_dir / f"{file_id}.pt"
         if not overwrite and output_path.exists():
             skipped += 1
             continue
-        
+
         try:
             t_start = time.time()
-            
+
             # Load audio with soundfile (faster than torchaudio for WAV)
-            waveform, sr = sf.read(audio_path, dtype='float32')
-            
+            waveform, sr = sf.read(audio_path, dtype="float32")
+
             # Convert to torch tensor and ensure correct shape
             waveform = torch.from_numpy(waveform)
             if waveform.ndim == 1:
                 waveform = waveform.unsqueeze(0)
             else:
                 waveform = waveform.T
-            
+
             # Ensure mono audio (take first channel if multi-channel)
             if waveform.shape[0] > 1:
                 waveform = waveform[0:1, :]
-            
+
             t_load = time.time() - t_start
-            
+
             # Resample to 16kHz if needed
             if sr != ENCODER_SAMPLE_RATE:
                 waveform = torchaudio.functional.resample(
                     waveform, orig_freq=sr, new_freq=ENCODER_SAMPLE_RATE
                 )
                 t_load = time.time() - t_start
-            
+
             # Encode: Audio → Discrete Units
             if device == "cuda":
                 waveform = waveform.cuda()
-            
+
             with torch.no_grad():
                 encoded = encoder(waveform)
                 tokens = encoded["units"].cpu()
-            
+
             t_encode = time.time() - t_start - t_load
-            
+
             # Save tokens as .pt file
             torch.save(tokens, output_path)
-            
+
             t_write = time.time() - t_start - t_load - t_encode
-            
+
             # Collect timing stats
-            clock['load'].append(t_load)
-            clock['encode'].append(t_encode)
-            clock['write'].append(t_write)
-            
+            clock["load"].append(t_load)
+            clock["encode"].append(t_encode)
+            clock["write"].append(t_write)
+
             # Trim to window size
-            if len(clock['load']) > TIMING_WINDOW:
-                clock['load'] = clock['load'][-TIMING_WINDOW:]
-                clock['encode'] = clock['encode'][-TIMING_WINDOW:]
-                clock['write'] = clock['write'][-TIMING_WINDOW:]
-            
+            if len(clock["load"]) > TIMING_WINDOW:
+                clock["load"] = clock["load"][-TIMING_WINDOW:]
+                clock["encode"] = clock["encode"][-TIMING_WINDOW:]
+                clock["write"] = clock["write"][-TIMING_WINDOW:]
+
             processed += 1
-            
+
             x = 100
             if processed % x == 0:
                 # Print timing diagnostics every 100 files
                 l = f"{sum(clock['load'][-x:]) / min(x, len(clock['load'])) * 1000:.1f}"
                 e = f"{sum(clock['encode'][-x:]) / min(x, len(clock['encode'])) * 1000:.1f}"
                 w = f"{sum(clock['write'][-x:]) / min(x, len(clock['write'])) * 1000:.1f}"
-                print(f"{idx + 1}/{len(df)} | Avg (ms): load={l}, encode={e}, write={w}")
+                print(
+                    f"{idx + 1}/{len(df)} | Avg (ms): load={l}, encode={e}, write={w}"
+                )
 
         except Exception as e:
             # Skip F0 subsampling errors (non-critical)
             error_str = str(e)
             if "Cannot subsample F0" not in error_str:
                 if len(errors) < 1000:  # Cap at 1000 errors
-                    errors.append({
-                        "file_id": file_id,
-                        "audio_path": audio_path,
-                        "error": error_str,
-                    })
+                    errors.append(
+                        {
+                            "file_id": file_id,
+                            "audio_path": audio_path,
+                            "error": error_str,
+                        }
+                    )
                 print(f"ERROR [{file_id}]: {audio_path}")
                 print(f"  {error_str}\n")
-        
+
         finally:
             # Clear GPU memory periodically
             if torch.cuda.is_available() and processed % 100 == 0:
                 torch.cuda.empty_cache()
-    
+
     print(f"\n========================================")
     print(f"Processing complete: {processed}/{len(df)} successful")
     if skipped > 0:
@@ -221,7 +227,7 @@ def tokenize_manifest(
         print(f"Errors: {len(errors)}")
         print(f"See details above")
     print(f"========================================\n")
-    
+
     # Final error report
     if errors:
         print(f"========================================")
@@ -233,7 +239,7 @@ def tokenize_manifest(
         if len(errors) > 10:
             print(f"  ... and {len(errors) - 10} more errors")
         print(f"========================================\n")
-    
+
     print(f"Task {task_id} completed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
 
@@ -302,9 +308,9 @@ def main():
         choices=["cuda", "cpu"],
         help="Device to use (default: cuda)",
     )
-    
+
     args = parser.parse_args()
-    
+
     tokenize_manifest(
         manifest_path=args.manifest,
         dense_model=args.dense_model,
