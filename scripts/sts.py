@@ -28,16 +28,21 @@ import argparse
 import warnings
 from pathlib import Path
 from datetime import datetime
+from functools import partial
 
+import numpy as np
 import omegaconf  # type: ignore
 import torch  # type: ignore
 import torchaudio  # type: ignore
-import torchaudio.transforms as T  # type: ignore
 
 from utils import load_manifest_rows
 
 sys.path.insert(0, str(Path(__file__).parent))
 warnings.filterwarnings("ignore")
+
+# ============================================================================
+# Patching
+# ============================================================================
 
 # OmegaConf patch: convert floats to ints
 _original_merge = omegaconf.OmegaConf.merge
@@ -93,7 +98,6 @@ import fairseq.checkpoint_utils  # type: ignore
 import fairseq.data.dictionary  # type: ignore
 from textless.data.speech_encoder import SpeechEncoder  # type: ignore
 from textless.vocoders.hifigan.vocoder import CodeHiFiGANVocoder  # type: ignore
-from textless.vocoders.tacotron2.vocoder import TacotronVocoder  # type: ignore
 
 # Allowlist fairseq classes for PyTorch 2.6+ security
 torch.serialization.add_safe_globals(
@@ -144,118 +148,130 @@ def _patched_load_checkpoint(path, *args, **kwargs):
 
 fairseq.checkpoint_utils.load_checkpoint_to_cpu = _patched_load_checkpoint
 
-def process_manifest(manifest_path: str, task_id: int = 0, num_tasks: int = 1):
+
+# ============================================================================
+# Shared Setup
+# ============================================================================
+
+SAMPLE_RATE = 16000
+ENCODER = None
+VOCODER = None
+
+
+def load_models():
+    """Load encoder and vocoder models (cached globally)."""
+    global ENCODER, VOCODER
+    if ENCODER is None:
+        dense_model = "mhubert-base-vp_mls_cv_8lang"
+        quantizer, vocab_size = "kmeans", 2000
+
+        ENCODER = SpeechEncoder.by_name(
+            dense_model_name=dense_model,
+            quantizer_model_name=quantizer,
+            vocab_size=vocab_size,
+            deduplicate=True,
+        ).cuda()
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Encoder loaded")
+
+        VOCODER = CodeHiFiGANVocoder.by_name(dense_model, quantizer, vocab_size).cuda()
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Vocoder loaded")
+
+    return ENCODER, VOCODER
+
+
+def resynthesize(waveform: torch.Tensor, sr: int) -> np.ndarray:
+    """Resynthesize audio through encoder-vocoder pipeline."""
+    encoder, vocoder = load_models()
+
+    # Ensure mono
+    if waveform.dim() > 1 and waveform.shape[0] > 1:
+        waveform = waveform[0:1, :]
+    elif waveform.dim() == 1:
+        waveform = waveform.unsqueeze(0)
+
+    # Resample to 16kHz if needed
+    if sr != SAMPLE_RATE:
+        waveform = torchaudio.functional.resample(waveform, sr, SAMPLE_RATE)
+
+    # Encode → Decode
+    with torch.no_grad():
+        units = encoder(waveform.cuda())["units"]
+        audio = vocoder(units).cpu().numpy()
+
+    return audio
+
+
+# ============================================================================
+# Manifest-based Processing
+# ============================================================================
+
+
+def process_manifest(manifest_path: str, output_name: str = None, task_id: int = 0, num_tasks: int = 1):
     """
-    Process all audio files from manifest.
+    Process audio files from manifest (CSV or JSONL).
 
     Args:
-        manifest_path: Path to input manifest (CSV or JSONL)
-        task_id: Task ID for parallel processing (default: 0)
-        num_tasks: Total number of parallel tasks (default: 1)
+        manifest_path: Path to input manifest
+        output_name: Output folder name (default: extracted from manifest name)
+        task_id: Task ID for parallel processing (0-indexed)
+        num_tasks: Total number of parallel tasks
     """
-
-    # Load manifest
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Reading manifest: {manifest_path}")
     entries = load_manifest_rows(manifest_path)
-    dataset_name = manifest_path.split("/")[-1].split(".")[0].split("_")[0]
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Loaded {len(entries)} entries")
-    
+
+    # Output folder name
+    if output_name is None:
+        output_name = Path(manifest_path).stem.split("_")[0]
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Loaded {len(entries)} entries → output/{output_name}/")
+
     # Filter for this task (array job parallelization)
     if num_tasks > 1:
         entries = [e for i, e in enumerate(entries) if i % num_tasks == task_id]
-        print(f"Task {task_id}/{num_tasks}: Processing {len(entries)} files")
+        print(f"Task {task_id + 1}/{num_tasks}: Processing {len(entries)} files")
 
-    SAMPLE_RATE = 16000
-    dense_model, quantizer, vocab_size = (
-        "mhubert-base-vp_mls_cv_8lang",
-        "kmeans",  # "kmeans-expresso",
-        2000,
-    )
+    # Load models
+    encoder, vocoder = load_models()
 
-    encoder = SpeechEncoder.by_name(
-        dense_model_name=dense_model,
-        quantizer_model_name=quantizer,
-        vocab_size=vocab_size,
-        deduplicate=True,
-    ).cuda()
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Encoder loaded")
+    count = 0
+    log_every = max(1, len(entries) // 10)
 
-    vocoder = CodeHiFiGANVocoder.by_name(dense_model, quantizer, vocab_size).cuda()
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Vocoder loaded")
-
-    count = 1
-    tenth_of = len(entries) // 10
-
-    for entry in entries:
+    for i, entry in enumerate(entries):
         input_path = entry["audio_filepath"]
-
-        # Use just the filename
         filename = Path(input_path).name
-
-        # Output path: flat structure under dataset name
-        output_path = Path("output") / dataset_name / filename
+        output_path = Path("output") / output_name / filename
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         if output_path.exists():
-            print(f"Skipping (exists): {output_path}")
             continue
 
-        if count == 1 or count % tenth_of == 0:
-            print(f"Processing [{count}/{len(entries)}]: {input_path}")
+        if i % log_every == 0:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] Processing [{i+1}/{len(entries)}]: {filename}")
 
         try:
-            # Load and preprocess audio
             waveform, sr = torchaudio.load(input_path)
-
-            # Ensure mono
-            if waveform.shape[0] > 1:
-                print(f"  Warning: {waveform.shape[0]} channels, using first")
-                waveform = waveform[0:1, :]
-
-            # Resample to 16kHz
-            if sr != SAMPLE_RATE:
-                waveform = torchaudio.functional.resample(
-                    waveform, orig_freq=sr, new_freq=SAMPLE_RATE
-                )
-
-            # Encode: Audio → Discrete Units
-            encoded = encoder(waveform.cuda())
-            units = encoded["units"]
-
-            # Synthesize: Discrete Units → Audio
-            audio = vocoder(units)
-
-            # Save
-            torchaudio.save(
-                str(output_path),
-                audio.cpu().float().unsqueeze(0),
-                vocoder.output_sample_rate,
-            )
+            audio = resynthesize(waveform, sr)
+            torchaudio.save(str(output_path), torch.from_numpy(audio).unsqueeze(0), vocoder.output_sample_rate)
             count += 1
-
         except Exception as e:
             print(f"ERROR processing {input_path}: {e}")
-            import traceback
-
-            traceback.print_exc()
             continue
 
-    print(f"Task {task_id} completed: {count}/{len(entries)} files")
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Task {task_id} completed: {count}/{len(entries)} files")
+
+
+# ============================================================================
+# CLI
+# ============================================================================
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Speech-to-speech resynthesis from manifest (CSV or JSONL)"
+        description="Speech-to-speech resynthesis from manifest"
     )
-    parser.add_argument(
-        "--manifest", required=True, help="Path to manifest (.csv or .jsonl)"
-    )
-    parser.add_argument(
-        "--task-id", type=int, default=0, help="Task ID for array jobs (0-indexed)"
-    )
-    parser.add_argument(
-        "--num-tasks", type=int, default=1, help="Total number of parallel tasks"
-    )
+    parser.add_argument("manifest", help="Path to manifest (.csv or .jsonl)")
+    parser.add_argument("-o", "--output", help="Output folder name (default: auto)")
+    parser.add_argument("--task-id", type=int, default=0, help="Task ID for array jobs")
+    parser.add_argument("--num-tasks", type=int, default=1, help="Total parallel tasks")
 
     args = parser.parse_args()
-    process_manifest(args.manifest, args.task_id, args.num_tasks)
+    process_manifest(args.manifest, args.output, args.task_id, args.num_tasks)

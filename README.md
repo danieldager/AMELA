@@ -25,7 +25,7 @@ conda create -n sts python=3.9 -y && conda activate sts
 git clone https://github.com/facebookresearch/textlesslib.git
 pip install -e textlesslib/
 pip install git+https://github.com/pytorch/fairseq.git@dd106d9534b22e7db859a6b87ffd7780c38341f8
-pip install 'omegaconf==2.0.6' 'hydra-core==1.0.7' h5py pandas==1.5.3
+pip install 'omegaconf==2.0.6' 'hydra-core==1.0.7' h5py pandas==1.5.3 datasets
 
 # Encoding
 conda create -n textless python=3.9 -y && conda activate textless
@@ -37,7 +37,7 @@ pip install torch pandas numpy transformers accelerate wandb
 
 # ASR / ASR Evaluation
 conda create -n asr python=3.10 -y && conda activate asr
-pip install "nemo_toolkit[all]" torch torchaudio transformers whisper-normalizer jiwer
+pip install "nemo_toolkit[all]" torch torchaudio pandas datasets transformers whisper-normalizer jiwer
 ```
 
 **STS Critical Fix**: Edit `textlesslib/textless/data/hubert_feature_reader.py` line 32 - add `strict=False` to `load_model_ensemble_and_task()`. See `TECHNICAL.md`.
@@ -111,22 +111,11 @@ sbatch scripts/synthesize.slurm output/generations/<model_name>
 ### 7. ASR Evaluation
 
 ```bash
-sbatch scripts/asr_eval.slurm metadata/ls-clean.csv
+sbatch scripts/asr_eval.slurm <manifest> <output_csv> <dataset_name>
 ```
 
-**Input**: CSV with `file_id`, `audio_filepath`, `transcription`  
-**Output**: Updates manifest with WER/CER columns, saves `output/<split>_global_metrics.csv`
-
----
-
-## Data Formats
-
-**CSV**: Standard with headers (`file_id`, `audio_filepath`, `transcription`, etc.)
-
-**JSONL** (`.json`):
-```json
-{"audio_filepath": "/absolute/path/file.wav", "duration": 21.4}
-```
+**Input**: CSV with `audio_filepath`, `transcription`  
+**Output**: Updates manifest with `{model}_transcription`, `{model}_wer_pct`, `{model}_mer_pct`, `{model}_cer_pct`; appends global metrics to output CSV
 
 ---
 
