@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
-"""
-Tokenize audio files using speech encoders (e.g., mHuBERT + k-means).
-
-Outputs individual .pt files (one per audio file) for parallel processing.
-
-Usage:
-    python encode.py --manifest metadata/expresso.csv --task-id 0 --num-tasks 6
-"""
+"""Tokenize audio files using mHuBERT + k-means with optional splitting."""
 
 import argparse
 import sys
@@ -22,11 +15,12 @@ import torchaudio  # type: ignore
 
 warnings.filterwarnings("ignore")
 
-# Import compatibility fixes from sts.py
+# Monkey-patching
 sys.path.insert(0, str(Path(__file__).parent))
-from sts import *  # Imports monkey patches and encoder setup
-
+from sts import *
 from textless.data.speech_encoder import SpeechEncoder  # type: ignore
+
+FRAME_RATE = 50  # mHuBERT: 50 Hz = 20ms hop
 
 
 def tokenize_manifest(
@@ -39,56 +33,29 @@ def tokenize_manifest(
     deduplicate: bool = True,
     overwrite: bool = False,
     device: str = "cuda",
+    use_splits: bool = True,
 ):
-    """
-    Tokenize audio files and save individual .pt files.
+    """Tokenize audio files, with optional splitting on frame boundaries."""
 
-    Args:
-        manifest_path: Path to CSV with audio_filepath and file_id columns
-        dense_model: Dense model name (e.g., "mhubert-base-vp_mls_cv_8lang")
-        quantizer: Quantizer name (e.g., "kmeans")
-        vocab_size: Vocabulary size (e.g., 2000)
-        task_id: Task ID for parallel processing (default: 0)
-        num_tasks: Total number of parallel tasks (default: 1)
-        deduplicate: Remove consecutive duplicate tokens (default: True)
-        overwrite: Overwrite existing token files (default: False)
-        device: Device to use ('cuda' or 'cpu', default: 'cuda')
-    """
-
-    print(f"========================================")
+    print(f"\n{'='*50}")
     print(f"Tokenization Task {task_id}/{num_tasks}")
-    print(f"========================================")
+    print(f"{'='*50}")
     print(f"Manifest: {manifest_path}")
     print(f"Model: {dense_model} + {quantizer} (vocab={vocab_size})")
-    print(f"Deduplicate: {deduplicate}")
-    print(f"Overwrite: {overwrite}")
-    print(f"Device: {device}")
+    print(f"Splits: {use_splits} | Dedup: {deduplicate} | Device: {device}")
     print(f"Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"========================================\n")
+    print(f"{'='*50}\n")
 
-    # Read manifest (CSV format)
     df = pd.read_csv(manifest_path)
-
-    # Validate required columns
-    if "audio_filepath" not in df.columns:
-        print(f"ERROR: Manifest must have 'audio_filepath' column")
-        print(f"Found columns: {list(df.columns)}")
+    if "audio_filepath" not in df.columns or "file_id" not in df.columns:
+        print("ERROR: Manifest must have 'audio_filepath' and 'file_id' columns")
         return
 
-    if "file_id" not in df.columns:
-        print(f"ERROR: Manifest must have 'file_id' column")
-        print(f"Found columns: {list(df.columns)}")
-        return
-
-    # Slice for this task (round-robin distribution)
+    # Distribute files across tasks
     df = df.iloc[task_id::num_tasks].reset_index(drop=True)
     print(f"Processing {len(df)} files (task {task_id})\n")
 
-    if len(df) == 0:
-        print("No files to process for this task")
-        return
-
-    # Initialize encoder
+    # Load encoder
     print("Loading encoder...")
     encoder = SpeechEncoder.by_name(
         dense_model_name=dense_model,
@@ -99,148 +66,131 @@ def tokenize_manifest(
     )
     if device == "cuda" and torch.cuda.is_available():
         encoder = encoder.cuda()
-    print(f"Encoder loaded on {device}\n")
+    print(f"Encoder on {device}\n")
 
-    # Setup output directory
+    # Setup output
     manifest_path_obj = Path(manifest_path)
     dataset_name = manifest_path_obj.stem.split("_")[0]
-    dense_model_name = dense_model.split("-")[0]
-    quantizer_name = quantizer.split("-")[-1]
-    model_name = f"{dense_model_name}_{quantizer_name}_{vocab_size}"
-
+    model_name = f"{dense_model.split('-')[0]}_{quantizer.split('-')[-1]}_{vocab_size}"
     output_dir = (
-        manifest_path_obj.parent.parent / "output" / f"{dataset_name}_{model_name}"
+        manifest_path_obj.parent.parent / "tokens" / f"{dataset_name}_{model_name}"
     )
-    output_dir.mkdir(exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Output: {output_dir}\n")
 
-    print(f"Output: {output_dir}/\n")
-
-    # Process files and save tokens
-    ENCODER_SAMPLE_RATE = 16000
     processed = 0
     skipped = 0
     errors = []
+    timings = {"load": [], "encode": [], "write": []}
 
-    # Timing diagnostics
-    clock = {"load": [], "encode": [], "write": []}
-    TIMING_WINDOW = 1000  # Keep last 1000 samples to avoid memory leak
+    # iterate over df rows
+    for idx, row in df.iterrows():
+        audio_path = row["audio_filepath"]
+        file_id = str(row["file_id"])
 
-    for idx, row_dict in enumerate(df.to_dict("records")):
-        audio_path = row_dict["audio_filepath"]
-        file_id = str(row_dict["file_id"])
-
-        # Check if tokens already exist (skip if not overwriting)
-        output_path = output_dir / f"{file_id}.pt"
-        if not overwrite and output_path.exists():
-            skipped += 1
-            continue
+        # Parse splits: handle NaN, strings, and lists
+        splits = None
+        if use_splits and "splits" in row and row["splits"] is not None:
+            splits_val = row["splits"]
+            # Check if it's NaN (float)
+            if isinstance(splits_val, float):
+                if splits_val != splits_val:  # NaN check
+                    splits = None
+            elif isinstance(splits_val, str) and splits_val.strip():
+                # Parse string representation of list
+                try:
+                    splits = [int(x) for x in eval(splits_val)]
+                except:
+                    splits = None
+            elif isinstance(splits_val, list):
+                splits = [int(x) for x in splits_val]
 
         try:
-            t_start = time.time()
+            t0 = time.time()
 
-            # Load audio with soundfile (faster than torchaudio for WAV)
+            # Load and preprocess audio
             waveform, sr = sf.read(audio_path, dtype="float32")
-
-            # Convert to torch tensor and ensure correct shape
             waveform = torch.from_numpy(waveform)
             if waveform.ndim == 1:
                 waveform = waveform.unsqueeze(0)
-            else:
+            elif waveform.ndim == 2:
                 waveform = waveform.T
-
-            # Ensure mono audio (take first channel if multi-channel)
             if waveform.shape[0] > 1:
                 waveform = waveform[0:1, :]
 
-            t_load = time.time() - t_start
+            t_load = time.time() - t0
 
-            # Resample to 16kHz if needed
-            if sr != ENCODER_SAMPLE_RATE:
+            # Resample if needed
+            if sr != 16000:
                 waveform = torchaudio.functional.resample(
-                    waveform, orig_freq=sr, new_freq=ENCODER_SAMPLE_RATE
+                    waveform, orig_freq=sr, new_freq=16000
                 )
-                t_load = time.time() - t_start
+                t_load = time.time() - t0
 
-            # Encode: Audio → Discrete Units
-            if device == "cuda":
-                waveform = waveform.cuda()
+            # Determine segments: either from splits or full audio
+            if splits and len(splits) > 0:
+                # Frame indices → sample indices
+                splits_expanded = [0] + list(splits) + [waveform.shape[1]]
+                segments = [
+                    (splits_expanded[i], splits_expanded[i + 1])
+                    for i in range(len(splits_expanded) - 1)
+                ]
+            else:
+                segments = [(0, waveform.shape[1])]
 
-            with torch.no_grad():
-                encoded = encoder(waveform)
-                tokens = encoded["units"].cpu()
+            # Encode each segment
+            for split_idx, (start_sample, end_sample) in enumerate(segments):
+                output_path = output_dir / f"{file_id}_split_{split_idx}.pt"
+                if not overwrite and output_path.exists():
+                    skipped += 1
+                    continue
 
-            t_encode = time.time() - t_start - t_load
+                segment = waveform[:, start_sample:end_sample]
+                if device == "cuda":
+                    segment = segment.cuda()
 
-            # Save tokens as .pt file
-            torch.save(tokens, output_path)
+                with torch.no_grad():
+                    tokens = encoder(segment)["units"].cpu()
 
-            t_write = time.time() - t_start - t_load - t_encode
+                t_encode = time.time() - t0 - t_load
+                torch.save(tokens, output_path)
+                processed += 1
+                t_write = time.time() - t0 - t_load - t_encode
 
-            # Collect timing stats
-            clock["load"].append(t_load)
-            clock["encode"].append(t_encode)
-            clock["write"].append(t_write)
+                # Track timing
+                timings["load"].append(t_load)
+                timings["encode"].append(t_encode)
+                timings["write"].append(t_write)
+                if len(timings["load"]) > 1000:
+                    for k in timings:
+                        timings[k] = timings[k][-1000:]
 
-            # Trim to window size
-            if len(clock["load"]) > TIMING_WINDOW:
-                clock["load"] = clock["load"][-TIMING_WINDOW:]
-                clock["encode"] = clock["encode"][-TIMING_WINDOW:]
-                clock["write"] = clock["write"][-TIMING_WINDOW:]
-
-            processed += 1
-
-            x = 100
-            if processed % x == 0:
-                # Print timing diagnostics every 100 files
-                l = f"{sum(clock['load'][-x:]) / min(x, len(clock['load'])) * 1000:.1f}"
-                e = f"{sum(clock['encode'][-x:]) / min(x, len(clock['encode'])) * 1000:.1f}"
-                w = f"{sum(clock['write'][-x:]) / min(x, len(clock['write'])) * 1000:.1f}"
-                print(
-                    f"{idx + 1}/{len(df)} | Avg (ms): load={l}, encode={e}, write={w}"
-                )
+                if processed % 1000 == 0:
+                    window = min(1000, len(timings["load"]))
+                    avg_load_s = sum(timings["load"][-1000:]) / window
+                    avg_encode_s = sum(timings["encode"][-1000:]) / window
+                    print(
+                        f"{idx}/{len(df)} | "
+                        f"load={avg_load_s:.3f}s encode={avg_encode_s:.3f}s"
+                    )
 
         except Exception as e:
-            # Skip F0 subsampling errors (non-critical)
             error_str = str(e)
             if "Cannot subsample F0" not in error_str:
-                if len(errors) < 1000:  # Cap at 1000 errors
-                    errors.append(
-                        {
-                            "file_id": file_id,
-                            "audio_path": audio_path,
-                            "error": error_str,
-                        }
-                    )
-                print(f"ERROR [{file_id}]: {audio_path}")
-                print(f"  {error_str}\n")
+                if len(errors) < 100:
+                    errors.append((file_id, audio_path, error_str))
+                print(f"ERROR [{file_id}]: {error_str[:100]}")
 
-        finally:
-            # Clear GPU memory periodically
-            if torch.cuda.is_available() and processed % 100 == 0:
-                torch.cuda.empty_cache()
-
-    print(f"\n========================================")
-    print(f"Processing complete: {processed}/{len(df)} successful")
-    if skipped > 0:
-        print(f"Skipped: {skipped} (already existed)")
+    print(f"\n{'='*50}")
+    print(f"Complete: {processed} files, {skipped} skipped")
     if errors:
         print(f"Errors: {len(errors)}")
-        print(f"See details above")
-    print(f"========================================\n")
-
-    # Final error report
-    if errors:
-        print(f"========================================")
-        print(f"ERROR REPORT ({len(errors)} failed files)")
-        print(f"========================================")
-        for err in errors[:10]:  # Show first 10
-            print(f"  {err['file_id']}: {err['audio_path']}")
-            print(f"    → {err['error']}")
-        if len(errors) > 10:
-            print(f"  ... and {len(errors) - 10} more errors")
-        print(f"========================================\n")
-
-    print(f"Task {task_id} completed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        for file_id, path, err in errors[:5]:
+            print(f"  {file_id}: {err[:80]}")
+        if len(errors) > 5:
+            print(f"  ... and {len(errors) - 5} more")
+    print(f"Task {task_id} done: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"{'='*50}\n")
 
 
 def main():
@@ -251,43 +201,27 @@ def main():
         "--manifest",
         type=str,
         required=True,
-        help="Path to CSV manifest with audio_filepath column",
+        help="CSV manifest with audio_filepath and file_id",
     )
     parser.add_argument(
         "--dense-model",
         type=str,
         default="mhubert-base-vp_mls_cv_8lang",
-        help="Dense model name (default: mhubert-base-vp_mls_cv_8lang)",
+        help="Dense model name",
     )
     parser.add_argument(
-        "--quantizer",
-        type=str,
-        default="kmeans-expresso",
-        help="Quantizer name (default: kmeans-expresso)",
+        "--quantizer", type=str, default="kmeans", help="Quantizer name"
     )
+    parser.add_argument("--vocab-size", type=int, default=2000, help="Vocabulary size")
+    parser.add_argument("--task-id", type=int, default=0, help="Task ID for array job")
     parser.add_argument(
-        "--vocab-size",
-        type=int,
-        default=2000,
-        help="Vocabulary size (default: 2000)",
-    )
-    parser.add_argument(
-        "--task-id",
-        type=int,
-        default=0,
-        help="Task ID for array job (0-indexed)",
-    )
-    parser.add_argument(
-        "--num-tasks",
-        type=int,
-        default=1,
-        help="Total number of parallel tasks",
+        "--num-tasks", type=int, default=1, help="Total number of parallel tasks"
     )
     parser.add_argument(
         "--deduplicate",
         action="store_true",
         default=True,
-        help="Remove consecutive duplicate tokens (default: True)",
+        help="Remove consecutive duplicate tokens",
     )
     parser.add_argument(
         "--no-deduplicate",
@@ -299,18 +233,24 @@ def main():
         "--overwrite",
         action="store_true",
         default=False,
-        help="Overwrite existing token files (default: False, skip existing)",
+        help="Overwrite existing token files",
     )
     parser.add_argument(
         "--device",
         type=str,
         default="cuda",
         choices=["cuda", "cpu"],
-        help="Device to use (default: cuda)",
+        help="Device to use",
+    )
+    parser.add_argument(
+        "--no-splits",
+        action="store_false",
+        dest="use_splits",
+        default=True,
+        help="Disable splitting on 'splits' column",
     )
 
     args = parser.parse_args()
-
     tokenize_manifest(
         manifest_path=args.manifest,
         dense_model=args.dense_model,
@@ -321,6 +261,7 @@ def main():
         deduplicate=args.deduplicate,
         overwrite=args.overwrite,
         device=args.device,
+        use_splits=args.use_splits,
     )
 
 

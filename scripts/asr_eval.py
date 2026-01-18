@@ -90,8 +90,12 @@ def transcribe_canary(model, audio_paths: list[str]) -> list[str]:
 
 # Define available models
 MODELS = [
-    ASRModel(name="whisper", batch_size=WHISPER_BATCH_SIZE, load_fn=load_whisper, transcribe_fn=transcribe_whisper),
-    ASRModel(name="canary", batch_size=CANARY_BATCH_SIZE, load_fn=load_canary, transcribe_fn=transcribe_canary),
+    ASRModel(
+        name="whisper", batch_size=WHISPER_BATCH_SIZE, load_fn=load_whisper, transcribe_fn=transcribe_whisper
+        ),
+    ASRModel(
+        name="canary", batch_size=CANARY_BATCH_SIZE, load_fn=load_canary, transcribe_fn=transcribe_canary
+        ),
 ]
 
 

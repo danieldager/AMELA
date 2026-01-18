@@ -52,7 +52,10 @@ pip install "nemo_toolkit[all]" torch torchaudio pandas datasets transformers wh
 sbatch scripts/vad.slurm /path/to/audio/
 ```
 
-**Output**: `metadata/<dirname>_<date>.csv` (VAD stats), `metadata/<dirname>_<date>.json` (manifest)
+**Output**: `metadata/<dirname>_<DDMMYY>/`
+- `metadata.csv` - Per-file VAD statistics and split points
+- `global.csv` - Aggregated dataset metrics
+- `flags/*.npy` - Binary speech/silence flags per file
 
 ### 2. STS - Speech-to-Speech Resynthesis
 

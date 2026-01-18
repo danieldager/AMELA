@@ -5,317 +5,331 @@ Dataset-agnostic: processes any directory structure, stores absolute paths.
 """
 
 import argparse
-import json
 import multiprocessing as mp
+import os
 import sys
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed, wait, FIRST_COMPLETED
 from datetime import datetime
 from pathlib import Path
 
-import numpy as np
-import pandas as pd
+import numpy as np  # type: ignore
+import pandas as pd  # type: ignore
 import soundfile as sf  # type: ignore
-import torch
+import torch  # type: ignore
 import torchaudio  # type: ignore
 from ten_vad import TenVad  # type: ignore
 
 
-def get_runs(flags):
+def get_runs(flags, hop_size, sr, max_thresh, min_thresh, decay_rate):
     """
-    Return (start, end) pairs for periods of speech and non-speech.
-
-    Args:
-        flags: Array of VAD flags (0=non-speech, 1=speech)
-
-    Returns:
-        Tuple of (speech_runs, non_speech_runs) as numpy arrays
+    Merge speech segments based on dynamic thresholding.
+    Returns merged flags and the runs (start, end) for speech and silence.
     """
     if len(flags) == 0:
-        return np.array([]), np.array([])
+        return flags.copy(), np.array([]), np.array([])
 
-    first_flag = flags[0]
-    last_index = len(flags)
-    arr = np.flatnonzero(np.diff(flags))
-    arr = np.r_[0, arr + 1, last_index]
+    # Identify flags
+    diffs = np.diff(flags)
+    changes = np.flatnonzero(diffs) + 1
+    boundaries = np.r_[0, changes, len(flags)]
+    new_flags = flags.copy()
 
-    pairs = np.column_stack((arr[:-1], arr[1:]))
-    odd = pairs[::2]
-    even = pairs[1::2]
+    # Initial state
+    is_speech = new_flags[0] == 1
+    speech_dur = 0.0
 
-    if first_flag == 1:
-        ones = odd
-        zeros = even
+    # Merge speech segments with short silences
+    for i in range(len(boundaries) - 1):
+        start, end = boundaries[i], boundaries[i + 1]
+        dur = (end - start) * hop_size / sr
+
+        if is_speech:
+            speech_dur += dur  # Continue
+        else:
+            thresh = max(min_thresh, max_thresh - (decay_rate * speech_dur))
+            if dur < thresh:
+                new_flags[start:end] = 1  # Merge
+                speech_dur += dur
+            else:
+                speech_dur = 0.0  # Reset
+
+        is_speech = not is_speech  # Alternate
+
+    # Extract runs from the merged result
+    diffs = np.diff(new_flags)
+    changes = np.flatnonzero(diffs) + 1
+    boundaries = np.r_[0, changes, len(new_flags)]
+    runs = np.column_stack((boundaries[:-1], boundaries[1:]))
+
+    if new_flags[0] == 1:
+        ones, zeros = runs[::2], runs[1::2]
     else:
-        ones = even
-        zeros = odd
+        ones, zeros = runs[1::2], runs[::2]
 
-    return ones, zeros
+    return new_flags, ones, zeros
 
 
 def runs_to_secs(runs, hop_size, sr):
-    """
-    Convert runs of speech and non-speech from frames to seconds.
-
-    Args:
-        runs: Array of (start, end) frame pairs
-        hop_size: Number of samples per frame
-        sr: Sample rate
-
-    Returns:
-        Array of durations in seconds
-    """
-    if runs is None or len(runs) == 0:
-        return np.array([], dtype=np.float32)
-
-    frame_lengths = runs[:, 1] - runs[:, 0]
-    return (frame_lengths * (hop_size / sr)).astype(np.float32, copy=False)
+    """Convert frame runs to seconds."""
+    if len(runs) == 0:
+        return np.array([])
+    return (runs[:, 1] - runs[:, 0]) * hop_size / sr
 
 
-def find_splits(flags, hop_size, sr, target_interval=30.0):
+def find_splits(zeros, total_frames, hop_size, sr, target_interval=30.0):
     """
     Find optimal split points for long audio files.
 
-    Looks for non-speech runs of at least 300ms starting around target_interval,
-    and places split points at the middle of suitable non-speech segments.
-
-    Args:
-        flags: Array of VAD flags (0=non-speech, 1=speech)
-        hop_size: Number of samples per frame
-        sr: Sample rate
-        target_interval: Target interval for splits in seconds (default: 30.0)
-
-    Returns:
-        List of frame indices where splits should occur
+    Uses precomputed silence runs. For each target, finds silences
+    overlapping the search window and picks the longest one (full duration).
     """
+    if len(zeros) == 0:
+        return []
+
     splits = []
 
-    target_interval_frames = int(target_interval * sr / hop_size)
-    min_silence_frames = int(0.3 * sr / hop_size)
+    # Constants
+    target_frames = int(target_interval * sr / hop_size)
+    half_window = int(5.0 * sr / hop_size)  # +/- 5s
+    min_silence_frames = int(0.3 * sr / hop_size)  # 300ms minimum
 
-    # Start looking for splits after the first 30 seconds
-    current_pos = target_interval_frames
-    total_frames = len(flags)
+    current_start = 0
 
-    while current_pos < total_frames - target_interval_frames:
-        # Look for a suitable non-speech run starting from current_pos
-        split_found = False
+    while current_start + target_frames < total_frames:
+        # Search window centered on target
+        center = current_start + target_frames
+        win_start = max(current_start, center - half_window)
+        win_end = min(total_frames, center + half_window)
 
-        # Search window: look ahead up to 10 seconds for a good split point
-        search_end = min(current_pos + int(10.0 * sr / hop_size), total_frames)
+        # Find silences overlapping the window (use full duration for ranking)
+        candidates = []
+        for run_start, run_end in zeros:
+            # Check for overlap with window
+            if run_end <= win_start or run_start >= win_end:
+                continue
 
-        i = current_pos
-        while i < search_end:
-            if flags[i] == 0:  # Found start of non-speech
-                # Check how long this non-speech run is
-                silence_start = i
-                while i < total_frames and flags[i] == 0:
-                    i += 1
-                silence_end = i
-                silence_length = silence_end - silence_start
+            dur = run_end - run_start
+            if dur >= min_silence_frames:
+                split_point = run_start + dur // 2
+                candidates.append((dur, split_point))
 
-                # If silence is long enough (>=300ms), place split in the middle
-                if silence_length >= min_silence_frames:
-                    split_frame = silence_start + silence_length // 2
-                    splits.append(split_frame)
+        if candidates:
+            # Pick longest silence that touches the window
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            best_split = candidates[0][1]
+            splits.append(best_split)
+            current_start = best_split
+        else:
+            # No valid silence in window - find next valid silence after window
+            found = False
+            for run_start, run_end in zeros:
+                if run_start >= win_end:
+                    dur = run_end - run_start
+                    if dur >= min_silence_frames:
+                        split_point = run_start + dur // 2
+                        splits.append(split_point)
+                        current_start = split_point
+                        found = True
+                        break
 
-                    # Move to next target position (30 seconds after this split)
-                    current_pos = split_frame + target_interval_frames
-                    split_found = True
-                    break
-            else:
-                i += 1
-
-        # If no suitable split found, move forward and try again
-        if not split_found:
-            current_pos += int(10.0 * sr / hop_size)  # Skip ahead 10 seconds
+            if not found:
+                break
 
     return splits
 
 
-def process_single_wav(args):
-    """
-    Process a single WAV file - designed for multiprocessing.
-
-    Args:
-        args: Tuple of (wav_path, hop_size, threshold)
-
-    Returns:
-        Dict with audio metrics or error information
-    """
-    wav_path, hop_size, threshold = args
-
+def process_single_wav(
+    wav_path, hop_size, threshold, merge_max, merge_min, merge_decay, flags_dir
+):
+    """Process a single WAV file."""
     try:
-        # Each process gets its own instance
         TV = TenVad(hop_size=hop_size, threshold=threshold)
-    except Exception as e:
-        return {
-            "audio_filepath": str(wav_path),
-            "error": f"TenVad initialization failed: {str(e)}",
-        }
 
-    try:
-        # Read audio file and convert to mono if needed
+        # Read and preprocess
         data, sr = sf.read(str(wav_path), dtype="float32")
-        if len(data.shape) > 1:
+        if data.ndim > 1:
             data = data.mean(axis=1)
 
-        # Resample to 16kHz if needed (TenVAD expects 16kHz)
         TARGET_SR = 16000
         if sr != TARGET_SR:
-            data_tensor = torch.from_numpy(data).unsqueeze(0)
-            data_tensor = torchaudio.functional.resample(
-                data_tensor, orig_freq=sr, new_freq=TARGET_SR
-            )
-            data = data_tensor.squeeze(0).numpy()
+            data = torch.from_numpy(data).unsqueeze(0)
+            data = torchaudio.functional.resample(data, sr, TARGET_SR)
+            data = data.squeeze(0).numpy()
             sr = TARGET_SR
 
-        # Convert to int16 for TenVAD
+        # Convert to int16
         data = (data * 32767).astype(np.int16)
         duration = len(data) / sr
 
-        # Process frames
         num_frames = len(data) // hop_size
         if num_frames == 0:
-            raise ValueError(
-                f"Audio too short for hop_size {hop_size}: {len(data)} samples"
-            )
+            raise ValueError(f"Audio too short: {len(data)} samples")
 
+        # Process VAD
         frames = data[: num_frames * hop_size].reshape(-1, hop_size)
         flags = np.empty(num_frames, dtype=np.uint8)
 
         process_func = TV.process
         for i in range(num_frames):
-            _, flags[i] = process_func(frames[i])
+            ret, flag = process_func(frames[i])
+            # Debug: catch TenVad errors
+            if flag < 0 or flag > 1:
+                raise RuntimeError(
+                    f"TenVad returned invalid flag={flag} (ret={ret}) at frame {i}/{num_frames} | "
+                    f"file={wav_path.name}, sr={sr}, duration={duration:.2f}s, "
+                    f"frame_min={frames[i].min()}, frame_max={frames[i].max()}"
+                )
+            flags[i] = flag
 
-        spch_ratio = float(flags.mean())
+        # Merge flags
+        merged_flags, ones, zeros = get_runs(
+            flags, hop_size, sr, merge_max, merge_min, merge_decay
+        )
 
-        # Calculate runs and durations
-        ones, zeros = get_runs(flags)
-        spoken_secs = runs_to_secs(ones, hop_size, sr)
+        # Save flags
+        flags_path = flags_dir / f"{wav_path.stem}.npy"
+        np.save(flags_path, merged_flags)
+
+        # Metrics
+        speech_secs = runs_to_secs(ones, hop_size, sr)
         nospch_secs = runs_to_secs(zeros, hop_size, sr)
 
-        # Find splits for long files
-        splits = find_splits(flags, hop_size, sr) if duration >= 30.0 else ""
+        splits = (
+            find_splits(zeros, len(merged_flags), hop_size, sr)
+            if duration >= 30.0
+            else []
+        )
 
         return {
             "audio_filepath": str(wav_path),
             "duration": duration,
-            "max-spoken": float(spoken_secs.max()) if spoken_secs.size else 0.0,
-            "min-spoken": float(spoken_secs.min()) if spoken_secs.size else 0.0,
-            "avg-spoken": float(spoken_secs.mean()) if spoken_secs.size else 0.0,
+            "max-speech": float(speech_secs.max()) if speech_secs.size else 0.0,
+            "min-speech": float(speech_secs.min()) if speech_secs.size else 0.0,
+            "avg-speech": float(speech_secs.mean()) if speech_secs.size else 0.0,
+            "total-speech": float(speech_secs.sum()) if speech_secs.size else 0.0,
+            "count-speech": int(speech_secs.size),
             "max-nospch": float(nospch_secs.max()) if nospch_secs.size else 0.0,
             "min-nospch": float(nospch_secs.min()) if nospch_secs.size else 0.0,
             "avg-nospch": float(nospch_secs.mean()) if nospch_secs.size else 0.0,
-            "spch-ratio": spch_ratio,
+            "total-nospch": float(nospch_secs.sum()) if nospch_secs.size else 0.0,
+            "count-nospch": int(nospch_secs.size),
+            "spch-ratio": float(merged_flags.mean()),
             "splits": splits,
+            "flags_path": str(flags_path),
+            "speech_durations": speech_secs.tolist(),
+            "nospch_durations": nospch_secs.tolist(),
         }
 
     except Exception as e:
-        return {
-            "audio_filepath": str(wav_path),
-            "error": str(e),
-        }
+        return {"audio_filepath": str(wav_path), "error": str(e)}
 
 
-def process_wavs_parallel(wavs, hop_size, threshold, max_workers):
-    """
-    Process WAV files in parallel across multiple workers.
+def discover_files(dataset):
+    """Generator that yields audio file paths as they're discovered."""
+    EXTENSIONS = {".wav", ".flac"}
+    for root, _, files in os.walk(dataset):
+        for f in files:
+            if os.path.splitext(f)[1].lower() in EXTENSIONS:
+                yield Path(root) / f
 
-    Args:
-        wavs: List of WAV file paths
-        hop_size: Hop size for VAD processing
-        threshold: VAD threshold
-        max_workers: Number of parallel workers
 
-    Returns:
-        List of processing results (dicts with audio metrics)
-    """
-
-    args_list = [(wav, hop_size, threshold) for wav in wavs]
+def process_wavs_streaming(
+    dataset, hop_size, threshold, max_workers, merge_params, flags_dir
+):
+    """Process WAV files with lazy discovery via generator."""
+    merge_max, merge_min, merge_decay = merge_params
 
     results = []
     completed = 0
     errors = 0
-    total = len(wavs)
     start_time = time.time()
 
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        future_to_wav = {
-            executor.submit(process_single_wav, args): args[0] for args in args_list
-        }
+        futures = {}
+        file_iter = discover_files(dataset)
+        exhausted = False
 
-        # Collect results as they complete
-        for future in as_completed(future_to_wav):
-            wav_path = future_to_wav[future]
-            completed += 1
+        while not exhausted or futures:
+            # Submit new tasks while we have capacity
+            while len(futures) < max_workers * 2 and not exhausted:
+                try:
+                    wav_path = next(file_iter)
+                    future = executor.submit(
+                        process_single_wav,
+                        wav_path,
+                        hop_size,
+                        threshold,
+                        merge_max,
+                        merge_min,
+                        merge_decay,
+                        flags_dir,
+                    )
+                    futures[future] = wav_path
+                except StopIteration:
+                    exhausted = True
+                    break
 
-            if completed % (total // 10) == 0 or completed == total:
-                elapsed = time.time() - start_time
-                rate = completed / elapsed
-                eta = (total - completed) / rate if rate > 0 else 0
-                print(
-                    f"Progress: {completed}/{total} ({completed/total*100:.1f}%) "
-                    f"Rate: {rate:.1f} files/sec ETA: {eta:.0f}s"
+            # Process completed tasks
+            if futures:
+                done, _ = wait(
+                    list(futures.keys()), timeout=0.1, return_when=FIRST_COMPLETED
                 )
 
-            try:
-                result = future.result()
-                if result is not None:
-                    if "error" in result:
-                        errors += 1
+                for future in done:
+                    wav_path = futures.pop(future)
+                    completed += 1
+
+                    if completed % 2000 == 0 or (exhausted and not futures):
+                        elapsed = time.time() - start_time
+                        rate = completed / elapsed
                         print(
-                            f"WARNING: Error processing {wav_path.name}: {result['error']}",
-                            file=sys.stderr,
+                            f"[{completed:>6}] {rate:.1f} files/s | {elapsed:.0f}s elapsed"
                         )
-                    results.append(result)
-            except Exception as e:
-                errors += 1
-                print(f"ERROR: Exception with {wav_path}: {e}", file=sys.stderr)
 
-    elapsed = time.time() - start_time
-    print(f"Completed processing {len(results)}/{total} files in {elapsed:.1f}s")
+                    try:
+                        result = future.result()
+                        results.append(result)
+                        if "error" in result:
+                            errors += 1
+                            print(
+                                f"FAIL {wav_path.name}: {result['error']}",
+                                file=sys.stderr,
+                            )
+                    except Exception as e:
+                        errors += 1
+                        print(f"CRASH {wav_path.name}: {e}", file=sys.stderr)
+                        results.append(
+                            {"audio_filepath": str(wav_path), "error": f"CRASH: {e}"}
+                        )
 
+    print(f"Completed {len(results)} files in {time.time() - start_time:.1f}s")
     if errors > 0:
-        print(
-            f"WARNING: Encountered {errors} errors during processing", file=sys.stderr
-        )
+        print(f"WARNING: {errors} errors encountered", file=sys.stderr)
 
     return results
 
 
 def main():
     parser = argparse.ArgumentParser(description="VAD Pipeline for audio processing")
+    parser.add_argument("dataset", type=str, help="Directory containing audio files")
     parser.add_argument(
-        "dataset",
-        type=str,
-        help="Directory containing audio files (searches recursively for .wav and .flac)",
+        "--hop_size", type=int, default=256, help="Hop size (default: 256)"
     )
     parser.add_argument(
-        "--output",
-        "-o",
-        type=str,
-        default=None,
-        help="Output base path (default: metadata/<dirname>_<timestamp>). Creates .csv and .json",
+        "--threshold", type=float, default=0.5, help="VAD threshold (default: 0.5)"
     )
     parser.add_argument(
-        "--hop_size",
-        type=int,
-        default=256,
-        help="Hop size for VAD processing (default: 256)",
+        "--workers", "-w", type=int, default=None, help="Parallel workers"
     )
     parser.add_argument(
-        "--threshold",
-        type=float,
-        default=0.5,
-        help="VAD threshold (default: 0.5)",
+        "--merge_max", type=float, default=0.3, help="Max merge threshold (s)"
     )
     parser.add_argument(
-        "--workers",
-        "-w",
-        type=int,
-        default=None,
-        help="Number of parallel workers (default: auto-detect from CPUs)",
+        "--merge_min", type=float, default=0.1, help="Min merge threshold (s)"
+    )
+    parser.add_argument(
+        "--merge_decay", type=float, default=0.1, help="Merge decay rate"
     )
     args = parser.parse_args()
 
@@ -325,88 +339,110 @@ def main():
         print(f"ERROR: Dataset does not exist: {dataset}", file=sys.stderr)
         sys.exit(1)
 
-    # Find WAV files recursively
-    wavs = list(dataset.rglob("*.wav")) + list(dataset.rglob("*.flac"))
-    if not wavs:
-        print(f"ERROR: No WAV/FLAC files found in {dataset}", file=sys.stderr)
-        sys.exit(1)
-
-    print(f"Found {len(wavs)} audio files in {dataset}")
-
     # Auto-detect workers
     if args.workers is None:
         args.workers = mp.cpu_count()
     print(f"Using {args.workers} parallel workers")
 
-    # Determine output files
-    if args.output is None:
-        timestamp = datetime.now().strftime("%d-%m-%y")
-        output_dir = Path("metadata")
-        output_dir.mkdir(exist_ok=True)
-        dirname = dataset.name
-        output_base = output_dir / f"{dirname}_{timestamp}"
-    else:
-        output_base = Path(args.output)
-        output_base.parent.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%d%m%y")
+    output_dir = Path("metadata") / f"{dataset.name}_{timestamp}"
 
-    output_csv = output_base.with_suffix(".csv")
-    output_jsonl = output_base.with_suffix(".jsonl")
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Process files
-    try:
-        results = process_wavs_parallel(
-            wavs,
-            args.hop_size,
-            args.threshold,
-            args.workers,
+    flags_dir = output_dir / "flags"
+    flags_dir.mkdir(exist_ok=True)
+
+    durations_dir = output_dir / "durations"
+    durations_dir.mkdir(exist_ok=True)
+
+    metadata_csv = output_dir / "metadata.csv"
+    global_csv = output_dir / "global.csv"
+    speech_durations_npy = durations_dir / "speech_durations.npy"
+    nospch_durations_npy = durations_dir / "nospch_durations.npy"
+
+    print(f"Output directory: {output_dir}")
+    print(f"Saving flags to: {flags_dir}")
+    print(f"Discovering files in {dataset}...")
+
+    results = process_wavs_streaming(
+        dataset,
+        args.hop_size,
+        args.threshold,
+        args.workers,
+        (args.merge_max, args.merge_min, args.merge_decay),
+        flags_dir,
+    )
+    df = pd.DataFrame(results)
+    df.to_csv(metadata_csv, index=False)
+    print(f"Per-file metadata saved to {metadata_csv}")
+
+    # Collect all segment durations for histograms
+    all_speech = []
+    all_nospch = []
+    for result in results:
+        if "error" not in result or pd.isna(result.get("error")):
+            all_speech.extend(result.get("speech_durations", []))
+            all_nospch.extend(result.get("nospch_durations", []))
+
+    if all_speech:
+        np.save(speech_durations_npy, np.array(all_speech, dtype=np.float32))
+        print(
+            f"Speech segment durations saved to {speech_durations_npy} ({len(all_speech)} segments)"
         )
 
-        if not results:
-            print(
-                "ERROR: No results generated - all files failed processing",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+    if all_nospch:
+        np.save(nospch_durations_npy, np.array(all_nospch, dtype=np.float32))
+        print(
+            f"Non-speech segment durations saved to {nospch_durations_npy} ({len(all_nospch)} segments)"
+        )
 
-        df = pd.DataFrame(results)
+    # Global metrics
+    df = pd.DataFrame(results)
+    df.to_csv(metadata_csv, index=False)
+    print(f"Per-file metadata saved to {metadata_csv}")
 
-        # Save full CSV
-        df.to_csv(output_csv, index=False)
-        print(f"Full results saved to {output_csv}")
+    # Global metrics
+    if "error" not in df.columns or df["error"].isna().all():
+        valid_df = df
+    else:
+        valid_df = df[df["error"].isna()]
 
-        # Save JSONL with only audio_filepath and duration
-        with open(output_jsonl, "w") as f:
-            for _, row in df.iterrows():
-                if pd.isna(row.get("error")):
-                    entry = {
-                        "audio_filepath": row["audio_filepath"],
-                        "duration": row["duration"],
-                    }
-                    f.write(json.dumps(entry) + "\n")
+    if not valid_df.empty:
+        total_speech_dur = valid_df["total-speech"].sum()
+        total_speech_count = valid_df["count-speech"].sum()
+        total_nospch_dur = valid_df["total-nospch"].sum()
+        total_nospch_count = valid_df["count-nospch"].sum()
+        total_duration = valid_df["duration"].sum()
 
-        print(f"JSONL manifest saved to {output_jsonl}")
+        avg_speech = (
+            total_speech_dur / total_speech_count if total_speech_count > 0 else 0.0
+        )
+        avg_nospch = (
+            total_nospch_dur / total_nospch_count if total_nospch_count > 0 else 0.0
+        )
+        avg_file = valid_df["duration"].mean()
+        speech_ratio = total_speech_dur / total_duration if total_duration > 0 else 0.0
 
-        # Report statistics
-        if "error" in df.columns:
-            successful = df[df["error"].isna()]
-            errors_df = df[df["error"].notna()]
-            print(f"Successfully processed: {len(successful)}/{len(df)} files")
-            if len(errors_df) > 0:
-                print(f"WARNING: Failed files: {len(errors_df)}", file=sys.stderr)
-                for _, row in errors_df.head(5).iterrows():
-                    print(
-                        f"  {Path(row['audio_filepath']).name}: {row['error']}",
-                        file=sys.stderr,
-                    )
-        else:
-            print(f"Successfully processed: {len(df)} files")
+        global_metrics = {
+            "avg_speech_duration": avg_speech,
+            "avg_nospch_duration": avg_nospch,
+            "avg_file_duration": avg_file,
+            "global_speech_ratio": speech_ratio,
+        }
 
-    except Exception as e:
-        print(f"ERROR: Pipeline failed: {e}", file=sys.stderr)
-        import traceback
+        pd.DataFrame([global_metrics]).to_csv(global_csv, index=False)
 
-        traceback.print_exc()
-        sys.exit(1)
+        print(f"\n{'='*40}")
+        print(
+            f"Global: {total_duration/3600:.1f}h total | {speech_ratio*100:.1f}% speech"
+        )
+        print(f"Avg segment: {avg_speech:.2f}s speech | {avg_nospch:.2f}s silence")
+        print(f"{'='*40}")
+
+    if "error" in df.columns:
+        errors_df = df[df["error"].notna()]
+        if len(errors_df) > 0:
+            print(f"WARNING: {len(errors_df)} failed files", file=sys.stderr)
 
 
 if __name__ == "__main__":
