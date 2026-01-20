@@ -2,7 +2,7 @@
 #SBATCH --job-name=encode_array
 #SBATCH --output=logs/encode/encode_%A_%a.out
 #SBATCH --error=logs/encode/encode_%A_%a.err
-#SBATCH --array=0
+#SBATCH --array=0-2
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
@@ -33,13 +33,11 @@ TASK_ID=${SLURM_ARRAY_TASK_ID:-0}
 echo "=========================================="
 echo "Tokenization Array Job"
 echo "=========================================="
-echo "Job ID: $SLURM_JOB_ID"
-echo "Array Task ID: $TASK_ID / $NUM_TASKS"
+echo "Job ID: $SLURM_JOB_ID | Task ID: $TASK_ID / $((NUM_TASKS - 1))"
 echo "Manifest: $MANIFEST_PATH"
 echo "Model: $MODEL"
-echo "Output name: $MODEL_NAME"
-echo "Node: $SLURMD_NODENAME"
-echo "GPU: $CUDA_VISIBLE_DEVICES"
+echo "Token Directory: $MODEL_NAME"
+echo "Node: $SLURMD_NODENAME | GPU: $CUDA_VISIBLE_DEVICES"
 echo "Started: $(date)"
 echo "=========================================="
 

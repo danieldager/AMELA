@@ -307,68 +307,54 @@ def process_audio_file(
         write_sample_to_sink(sink, file_id, segment_id, tokens, audio_filepath)
         tracker.add_timing("write", time.time() - t_write_start)
         tracker.processed += 1
-        tracker.processed += 1
 
 
 def tokenize_manifest(config: Config) -> None:
     """Main tokenization pipeline."""
 
-    # Print header
-    print(f"\n{'='*60}")
-    print(f"Tokenization Task {config.task_id}/{config.num_tasks}")
-    print(f"{'='*60}")
-    print(f"Manifest: {config.manifest}")
-    print(f"Model: {config.model}")
-    print(f"Device: {config.device}")
-    print(f"Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"{'='*60}\n")
-
     # Load and prepare data
     df = load_manifest(config.manifest)
     df = df.iloc[config.task_id :: config.num_tasks].reset_index(drop=True)
-    print(f"Task {config.task_id}: Processing {len(df)} files\n")
+    print(f"Processing {len(df)} files\n")
 
     # Setup
-    encoder = load_encoder(config)
-    sink = setup_writer(config.manifest, config.model_name, config.task_id)
     tracker = ProgressTracker()
+    encoder = load_encoder(config)
 
-    print("Starting tokenization...\n")
+    with setup_writer(config.manifest, config.model_name, config.task_id) as sink:
+        for counter, row in enumerate(df.itertuples(index=False)):
+            file_id = str(row.file_id)
+            audio_filepath = str(row.audio_filepath)
+            segments = cast(List[Tuple[int, int]], row.segments)
 
-    # Process files
-    for counter, row in enumerate(df.itertuples(index=False)):
-        file_id = str(row.file_id)
-        audio_filepath = str(row.audio_filepath)
-        segments = cast(List[Tuple[int, int]], row.segments)
+            try:
+                process_audio_file(
+                    file_id=file_id,
+                    audio_filepath=audio_filepath,
+                    segments=segments,
+                    encoder=encoder,
+                    sink=sink,
+                    config=config,
+                    tracker=tracker,
+                )
+            except Exception as e:
+                error_msg = str(e)
+                # Skip F0 extraction errors (expected for some files)
+                if "Cannot subsample F0" not in error_msg:
+                    log_error(file_id, audio_filepath, error_msg[:100])
 
-        try:
-            process_audio_file(
-                file_id=file_id,
-                audio_filepath=audio_filepath,
-                segments=segments,
-                encoder=encoder,
-                sink=sink,
-                config=config,
-                tracker=tracker,
-            )
-        except Exception as e:
-            error_msg = str(e)
-            # Skip F0 extraction errors (expected for some files)
-            if "Cannot subsample F0" not in error_msg:
-                log_error(file_id, audio_filepath, error_msg[:100])
-
-        # Progress update every 1000 files
-        if counter % 1000 == 0 or counter == 100:
-            rate = tracker.get_throughput()
-            avg_load = tracker.get_avg_timing("load")
-            avg_encode = tracker.get_avg_timing("encode")
-            print(
-                f"  [{counter:5d}/{len(df)}] files | "
-                f"{tracker.processed} samples | "
-                f"{rate:.1f} samples/sec | "
-                f"load={avg_load:.3f}s encode={avg_encode:.3f}s",
-                flush=True,
-            )
+            # Progress update every 1000 files
+            if counter % 1000 == 0 or counter == 100:
+                rate = tracker.get_throughput()
+                avg_load = tracker.get_avg_timing("load")
+                avg_encode = tracker.get_avg_timing("encode")
+                print(
+                    f"  [{counter:5d}/{len(df)}] files | "
+                    f"{tracker.processed} samples | "
+                    f"{rate:.1f} samples/sec | "
+                    f"load={avg_load:.3f}s encode={avg_encode:.3f}s",
+                    flush=True,
+                )
 
     # Print summary
     print(f"\n{'='*60}")
