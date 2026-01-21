@@ -349,9 +349,9 @@ def tokenize_manifest(config: Config) -> None:
                 avg_load = tracker.get_avg_timing("load")
                 avg_encode = tracker.get_avg_timing("encode")
                 print(
-                    f"  [{counter:5d}/{len(df)}] files | "
+                    f"  [{counter:5d}/{len(df)}] | "
                     f"{tracker.processed} samples | "
-                    f"{rate:.1f} samples/sec | "
+                    f"{rate:.1f} s/sec | "
                     f"load={avg_load:.3f}s encode={avg_encode:.3f}s",
                     flush=True,
                 )

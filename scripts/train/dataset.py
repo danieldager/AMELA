@@ -106,8 +106,8 @@ class EvalDataset(Dataset):
 
         for i, sample in enumerate(dataset):
 
-            if i % 100 == 0:
-                print(f"Processed {len(self.blocks)}/{self.num_blocks} blocks.")
+            # if i % 100 == 0:
+            #     print(f"Processed {len(self.blocks)}/{self.num_blocks} blocks.")
 
             if len(self.blocks) < self.num_blocks:
                 tokens = sample.get("tokens.npy")

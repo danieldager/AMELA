@@ -2,7 +2,7 @@
 #SBATCH --job-name=encode_array
 #SBATCH --output=logs/encode/encode_%A_%a.out
 #SBATCH --error=logs/encode/encode_%A_%a.err
-#SBATCH --array=0-2
+#SBATCH --array=0-3
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
@@ -46,7 +46,7 @@ source ~/.bashrc
 conda activate textless
 
 # Run tokenization script
-python -u scripts2/encode/encode.py \
+python -u scripts/encode/encode.py \
     --manifest "$MANIFEST_PATH" \
     --model "$MODEL" \
     --model-name "$MODEL_NAME" \

@@ -27,4 +27,4 @@ export PYTHONPATH=$PYTHONPATH:$(pwd)
 torchrun \
     --nproc_per_node=$NUM_GPUS \
     --nnodes=1 \
-    scripts2/train/model.py \
+    scripts/train/model.py \
